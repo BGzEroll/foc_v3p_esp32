@@ -1,12 +1,17 @@
 #ifndef LEDS_H
 #define LEDS_H
 
-#include "stm32f4xx_hal.h"
+#include <cstdint>
+#include "driver/gpio.h"
+#include "esp_err.h"
 
 class leds
 {
     public:
-        leds(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState on_level);
+        leds(gpio_num_t pin, uint32_t on_level);
+
+    public:
+        esp_err_t init();
 
     public:
         void on();
@@ -14,9 +19,10 @@ class leds
         void toggle();
 
     private:
-        GPIO_TypeDef *port;
-        uint16_t pin;
-        GPIO_PinState on_level;
+        gpio_num_t pin;
+        uint32_t on_level;
+        uint32_t current_level;
+        bool initialized;
 };
 
 #endif

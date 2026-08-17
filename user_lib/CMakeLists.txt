@@ -1,0 +1,16 @@
+idf_component_register(
+    SRC_DIRS
+        "system"
+        "devices"
+        "drivers"
+        "drivers/bus"
+    EXCLUDE_SRCS
+        "devices/mpu6050_dev.cpp"
+        "drivers/mpu6050.cpp"
+        "drivers/bus/i2c_bus.cpp"
+        "drivers/bus/uart_bus.cpp"
+    INCLUDE_DIRS
+        "."
+    PRIV_REQUIRES
+        esp_driver_gpio
+)

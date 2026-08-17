@@ -1,18 +1,18 @@
 #include "led_dev.h"
 
 #include "drivers/leds.h"
-#include "main.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static constexpr uint32_t GREEN_LED_ON_TIME_MS = 100;
 static constexpr uint32_t GREEN_LED_OFF_TIME_MS = 900;
-static constexpr uint16_t LED_TASK_STACK_DEPTH = 128;
+static constexpr uint32_t LED_TASK_STACK_SIZE = 2048;
 static constexpr UBaseType_t LED_TASK_PRIORITY = tskIDLE_PRIORITY + 1U;
+static constexpr gpio_num_t GREEN_LED_GPIO = GPIO_NUM_2;
+static constexpr uint32_t GREEN_LED_ON_LEVEL = 0U;
 
-static leds green_led(ONBORAD_GREEN_LED_GPIO_Port,
-    ONBORAD_GREEN_LED_Pin,
-    GPIO_PIN_RESET);
+static leds green_led(GREEN_LED_GPIO, GREEN_LED_ON_LEVEL);
 
 /**
  * @brief 绿色 LED 周期闪烁任务
@@ -36,15 +36,17 @@ static void green_led_task_entry(void *argument)
  */
 void led_dev::init()
 {
+    ESP_ERROR_CHECK(green_led.init());
+
     BaseType_t result = xTaskCreate(green_led_task_entry,
         "green_led",
-        LED_TASK_STACK_DEPTH,
+        LED_TASK_STACK_SIZE,
         nullptr,
         LED_TASK_PRIORITY,
         nullptr);
 
     if(result != pdPASS)
     {
-        Error_Handler();
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
 }

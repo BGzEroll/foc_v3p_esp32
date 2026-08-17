@@ -1,8 +1,8 @@
 idf_component_register(
     SRCS
         "main.c"
-        "../user_lib/system/start.cpp"
     INCLUDE_DIRS
         "."
-        "../user_lib"
+    PRIV_REQUIRES
+        user_lib
 )
