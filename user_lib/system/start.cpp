@@ -3,5 +3,4 @@
  */
 extern "C" void start_init_all(void)
 {
-    
 }
