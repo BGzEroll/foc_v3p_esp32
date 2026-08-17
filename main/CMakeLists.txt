@@ -4,4 +4,5 @@ idf_component_register(
         "../user_lib/system/start.cpp"
     INCLUDE_DIRS
         "."
+        "../user_lib"
 )

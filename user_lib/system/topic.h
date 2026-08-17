@@ -1,8 +1,8 @@
 #ifndef TOPIC_H
 #define TOPIC_H
 
-#include "FreeRTOS.h"
-#include "queue.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include <stdint.h>
 #include <type_traits>
 
