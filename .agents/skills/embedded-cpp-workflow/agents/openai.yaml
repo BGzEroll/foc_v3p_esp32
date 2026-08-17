@@ -1,0 +1,4 @@
+interface:
+  display_name: "嵌入式代码风格"
+  short_description: "按用户规范编写和评审嵌入式 C/C++ 代码风格细则"
+  default_prompt: "使用 $embedded-cpp-workflow 按我的嵌入式 C/C++ 代码风格规范修改或评审代码。"
