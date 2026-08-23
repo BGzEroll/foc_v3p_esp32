@@ -32,5 +32,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=/home/bgzerol/embedded_project/foc_v3p_esp32/build"
-  ]
+  ],
+  "idf.flashType": "UART"
 }

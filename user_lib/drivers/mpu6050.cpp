@@ -1,8 +1,8 @@
 #include "mpu6050.h"
 
-#include "system/sys_time.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <math.h>
 
 static constexpr uint8_t MPU6050_WHO_AM_I_REGISTER = 0x75;
@@ -72,16 +72,11 @@ static float wrap_angle_rad(float angle_rad)
 /**
  * @brief 创建 MPU6050 驱动对象
  *
- * @param i2c_bus_id I2C 总线编号
- * @param device_address MPU6050 的 7 位 I2C 地址
+ * @param i2c MPU6050 所使用的 I2C 从设备
  * @param accelerometer_weight 互补滤波中加速度角度的权重
  */
-mpu6050::mpu6050(uint8_t i2c_bus_id,
-    uint8_t device_address,
-    float accelerometer_weight)
-    : i2c(i2c_bus_id),
-      device_address(device_address),
-      accelerometer_weight(accelerometer_weight)
+mpu6050::mpu6050(i2c_device &i2c, float accelerometer_weight)
+    : i2c(i2c), accelerometer_weight(accelerometer_weight)
 {
 }
 
@@ -203,7 +198,7 @@ i2c_result mpu6050::update()
         return result;
     }
 
-    uint32_t timestamp_us = sys_time::get_us_tick();
+    uint32_t timestamp_us = (uint32_t)esp_timer_get_time();
     process_raw_sample(timestamp_us);
     current_sample.timestamp_us = timestamp_us;
     current_sample.sequence++;
@@ -233,8 +228,7 @@ i2c_result mpu6050::read_registers(uint8_t register_address,
     uint8_t *data,
     uint16_t size)
 {
-    return i2c.read_bytes(device_address,
-        register_address,
+    return i2c.read_bytes(register_address,
         data,
         size);
 }
@@ -249,8 +243,7 @@ i2c_result mpu6050::read_registers(uint8_t register_address,
  */
 i2c_result mpu6050::write_register(uint8_t register_address, uint8_t value)
 {
-    return i2c.write_bytes(device_address,
-        register_address,
+    return i2c.write_bytes(register_address,
         &value,
         1U);
 }

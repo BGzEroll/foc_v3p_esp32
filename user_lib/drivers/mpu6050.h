@@ -1,8 +1,8 @@
 #ifndef MPU6050_H
 #define MPU6050_H
 
+#include <cstdint>
 #include "bus/i2c_bus.h"
-#include <stdint.h>
 
 struct mpu6050_sample
 {
@@ -17,9 +17,7 @@ struct mpu6050_sample
 class mpu6050
 {
     public:
-        mpu6050(uint8_t i2c_bus_id,
-            uint8_t device_address,
-            float accelerometer_weight);
+        mpu6050(i2c_device &i2c, float accelerometer_weight);
 
     public:
         i2c_result init(bool calibrate_gyroscope = false);
@@ -37,8 +35,7 @@ class mpu6050
         void process_raw_sample(uint32_t timestamp_us);
 
     private:
-        i2c_bus i2c;
-        uint8_t device_address;
+        i2c_device &i2c;
         float accelerometer_weight;
         uint8_t raw_sample[14]{};
         float gyroscope_offset_rad_s[3]{};

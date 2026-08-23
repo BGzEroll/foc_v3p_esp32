@@ -1,573 +1,227 @@
 #include "i2c_bus.h"
 
-#include "i2c.h"
-#include "FreeRTOS.h"
-#include "semphr.h"
-#include "task.h"
+#include <climits>
 
-enum class i2c_transfer_direction : uint8_t
-{
-    READ = 0,
-    WRITE
-};
-
-// 管理一条物理 I2C 总线的互斥访问、DMA 状态和完成同步。
-class i2c_dev
-{
-    public:
-        explicit i2c_dev(I2C_HandleTypeDef *handle);
-
-    public:
-        i2c_result init();
-        i2c_result read_bytes(uint8_t device_address,
-            uint8_t register_address,
-            uint8_t *data,
-            uint16_t size,
-            uint32_t lock_timeout_ms,
-            uint32_t transfer_timeout_ms);
-        i2c_result write_bytes(uint8_t device_address,
-            uint8_t register_address,
-            const uint8_t *data,
-            uint16_t size,
-            uint32_t lock_timeout_ms,
-            uint32_t transfer_timeout_ms);
-        bool matches_handle(I2C_HandleTypeDef *target_handle) const;
-        void complete_from_isr(i2c_result result);
-
-    private:
-        i2c_result transfer_bytes(i2c_transfer_direction direction,
-            uint8_t device_address,
-            uint8_t register_address,
-            uint8_t *data,
-            uint16_t size,
-            uint32_t lock_timeout_ms,
-            uint32_t transfer_timeout_ms);
-        bool recover_bus();
-        void cancel_active_transfer();
-
-    private:
-        I2C_HandleTypeDef *handle;
-        SemaphoreHandle_t mutex = nullptr;
-        StaticSemaphore_t mutex_storage{};
-        SemaphoreHandle_t completion_semaphore = nullptr;
-        StaticSemaphore_t completion_semaphore_storage{};
-        bool initialized = false;
-        volatile bool transfer_active = false;
-        volatile i2c_result transfer_result = i2c_result::NOT_INITIALIZED;
-};
-
-static i2c_dev i2c_devs[] =
-{
-    i2c_dev(&hi2c1),
-    i2c_dev(&hi2c2)
-};
-
-static constexpr uint8_t I2C_DEV_COUNT =
-    (uint8_t)(sizeof(i2c_devs) / sizeof(i2c_devs[0]));
+static constexpr uint8_t I2C_GLITCH_IGNORE_COUNT = 7U;
 
 /**
- * @brief 将毫秒超时转换为 FreeRTOS tick
+ * @brief 将 ESP-IDF I2C 传输结果转换为总线结果
  *
- * @param timeout_ms 超时时间，单位毫秒
- *
- * @return FreeRTOS tick 数
- */
-static TickType_t milliseconds_to_ticks(uint32_t timeout_ms)
-{
-    TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
-
-    if(timeout_ms > 0U && ticks == 0U)
-    {
-        ticks = 1U;
-    }
-
-    return ticks;
-}
-
-/**
- * @brief 根据 HAL I2C 错误码生成总线结果
- *
- * @param handle HAL I2C 句柄
+ * @param error ESP-IDF 错误码
  *
  * @return I2C 总线结果
  */
-static i2c_result map_hal_error(I2C_HandleTypeDef *handle)
+static i2c_result map_transfer_error(esp_err_t error)
 {
-    uint32_t error = HAL_I2C_GetError(handle);
-
-    if((error & HAL_I2C_ERROR_AF) != 0U)
+    switch(error)
     {
-        return i2c_result::NACK;
-    }
-
-    if((error & (HAL_I2C_ERROR_DMA | HAL_I2C_ERROR_DMA_PARAM)) != 0U)
-    {
-        return i2c_result::DMA_ERROR;
-    }
-
-    if((error & HAL_I2C_ERROR_TIMEOUT) != 0U)
-    {
-        return i2c_result::TRANSFER_TIMEOUT;
-    }
-
-    return i2c_result::BUS_ERROR;
-}
-
-/**
- * @brief 将 HAL 状态转换为 I2C 总线结果
- *
- * @param handle HAL I2C 句柄
- * @param status HAL 调用状态
- *
- * @return I2C 总线结果
- */
-static i2c_result map_hal_status(I2C_HandleTypeDef *handle,
-    HAL_StatusTypeDef status)
-{
-    switch(status)
-    {
-        case HAL_OK:
+        case ESP_OK:
             return i2c_result::OK;
 
-        case HAL_BUSY:
-            return i2c_result::BUSY;
+        case ESP_ERR_INVALID_ARG:
+            return i2c_result::INVALID_ARGUMENT;
 
-        case HAL_TIMEOUT:
+        case ESP_ERR_INVALID_STATE:
+            return i2c_result::NOT_INITIALIZED;
+
+        case ESP_ERR_INVALID_RESPONSE:
+            return i2c_result::NACK;
+
+        case ESP_ERR_TIMEOUT:
             return i2c_result::TRANSFER_TIMEOUT;
 
-        case HAL_ERROR:
         default:
-            return map_hal_error(handle);
+            return i2c_result::BUS_ERROR;
     }
 }
 
 /**
- * @brief 根据总线编号获取物理 I2C 设备
+ * @brief 创建 I2C 主机总线对象
  *
- * @param bus_id I2C 总线编号
- *
- * @return 有效编号对应的设备指针，无效编号返回 nullptr
+ * @param port ESP32 I2C 控制器编号
+ * @param sda_pin SDA GPIO
+ * @param scl_pin SCL GPIO
+ * @param enable_internal_pullup 是否启用内部上拉
  */
-static i2c_dev *get_dev(uint8_t bus_id)
-{
-    if(bus_id >= I2C_DEV_COUNT)
-    {
-        return nullptr;
-    }
-
-    return &i2c_devs[bus_id];
-}
-
-/**
- * @brief 根据 HAL 句柄获取物理 I2C 设备
- *
- * @param handle HAL I2C 句柄
- *
- * @return 匹配的设备指针，未匹配时返回 nullptr
- */
-static i2c_dev *get_dev(I2C_HandleTypeDef *handle)
-{
-    for(uint8_t index = 0; index < I2C_DEV_COUNT; index++)
-    {
-        if(i2c_devs[index].matches_handle(handle))
-        {
-            return &i2c_devs[index];
-        }
-    }
-
-    return nullptr;
-}
-
-/**
- * @brief 创建物理 I2C 总线管理对象
- *
- * @param handle HAL I2C 句柄
- */
-i2c_dev::i2c_dev(I2C_HandleTypeDef *handle)
-    : handle(handle)
+i2c_bus::i2c_bus(i2c_port_num_t port,
+    gpio_num_t sda_pin,
+    gpio_num_t scl_pin,
+    bool enable_internal_pullup)
+    : port(port),
+      sda_pin(sda_pin),
+      scl_pin(scl_pin),
+      enable_internal_pullup(enable_internal_pullup)
 {
 }
 
 /**
- * @brief 初始化 I2C 总线的 FreeRTOS 同步对象
- *
- * @return I2C 总线结果
- */
-i2c_result i2c_dev::init()
-{
-    if(initialized)
-    {
-        return i2c_result::OK;
-    }
-
-    if(!handle || !handle->Instance || !handle->hdmarx || !handle->hdmatx)
-    {
-        return i2c_result::INIT_FAILED;
-    }
-
-    mutex = xSemaphoreCreateMutexStatic(&mutex_storage);
-    completion_semaphore =
-        xSemaphoreCreateBinaryStatic(&completion_semaphore_storage);
-
-    if(!mutex || !completion_semaphore)
-    {
-        mutex = nullptr;
-        completion_semaphore = nullptr;
-        return i2c_result::INIT_FAILED;
-    }
-
-    transfer_result = i2c_result::OK;
-    initialized = true;
-    return i2c_result::OK;
-}
-
-/**
- * @brief 使用 DMA 读取 I2C 设备寄存器
- *
- * @param device_address 7 位设备地址
- * @param register_address 起始寄存器地址
- * @param data 接收缓冲区
- * @param size 接收长度
- * @param lock_timeout_ms 等待总线互斥锁的超时时间，单位毫秒
- * @param transfer_timeout_ms 等待 DMA 完成的超时时间，单位毫秒
- *
- * @return I2C 总线结果
- */
-i2c_result i2c_dev::read_bytes(uint8_t device_address,
-    uint8_t register_address,
-    uint8_t *data,
-    uint16_t size,
-    uint32_t lock_timeout_ms,
-    uint32_t transfer_timeout_ms)
-{
-    return transfer_bytes(i2c_transfer_direction::READ,
-        device_address,
-        register_address,
-        data,
-        size,
-        lock_timeout_ms,
-        transfer_timeout_ms);
-}
-
-/**
- * @brief 使用 DMA 写入 I2C 设备寄存器
- *
- * @param device_address 7 位设备地址
- * @param register_address 起始寄存器地址
- * @param data 发送缓冲区
- * @param size 发送长度
- * @param lock_timeout_ms 等待总线互斥锁的超时时间，单位毫秒
- * @param transfer_timeout_ms 等待 DMA 完成的超时时间，单位毫秒
- *
- * @return I2C 总线结果
- */
-i2c_result i2c_dev::write_bytes(uint8_t device_address,
-    uint8_t register_address,
-    const uint8_t *data,
-    uint16_t size,
-    uint32_t lock_timeout_ms,
-    uint32_t transfer_timeout_ms)
-{
-    return transfer_bytes(i2c_transfer_direction::WRITE,
-        device_address,
-        register_address,
-        const_cast<uint8_t *>(data),
-        size,
-        lock_timeout_ms,
-        transfer_timeout_ms);
-}
-
-/**
- * @brief 判断 HAL I2C 句柄是否属于当前物理总线
- *
- * @param target_handle 待匹配的 HAL I2C 句柄
- *
- * @return 句柄匹配时返回 true
- */
-bool i2c_dev::matches_handle(I2C_HandleTypeDef *target_handle) const
-{
-    return handle == target_handle;
-}
-
-/**
- * @brief 执行一次受互斥锁保护的 I2C DMA 传输
- *
- * @param direction DMA 传输方向
- * @param device_address 7 位设备地址
- * @param register_address 起始寄存器地址
- * @param data 数据缓冲区
- * @param size 数据长度
- * @param lock_timeout_ms 等待总线互斥锁的超时时间，单位毫秒
- * @param transfer_timeout_ms 等待 DMA 完成的超时时间，单位毫秒
- *
- * @return I2C 总线结果
- */
-i2c_result i2c_dev::transfer_bytes(i2c_transfer_direction direction,
-    uint8_t device_address,
-    uint8_t register_address,
-    uint8_t *data,
-    uint16_t size,
-    uint32_t lock_timeout_ms,
-    uint32_t transfer_timeout_ms)
-{
-    if(!initialized)
-    {
-        return i2c_result::NOT_INITIALIZED;
-    }
-
-    if(device_address > 0x7FU || !data || size == 0U)
-    {
-        return i2c_result::INVALID_ARGUMENT;
-    }
-    if(__get_IPSR() != 0U ||
-        xTaskGetSchedulerState() != taskSCHEDULER_RUNNING)
-    {
-        return i2c_result::INVALID_CONTEXT;
-    }
-
-    TickType_t lock_timeout = milliseconds_to_ticks(lock_timeout_ms);
-    if(xSemaphoreTake(mutex, lock_timeout) != pdTRUE)
-    {
-        return i2c_result::LOCK_TIMEOUT;
-    }
-
-    while(xSemaphoreTake(completion_semaphore, 0U) == pdTRUE)
-    {
-    }
-
-    transfer_result = i2c_result::BUSY;
-    transfer_active = true;
-
-    uint16_t hal_device_address = (uint16_t)(device_address << 1);
-    HAL_StatusTypeDef hal_status;
-
-    if(direction == i2c_transfer_direction::READ)
-    {
-        hal_status = HAL_I2C_Mem_Read_DMA(handle,
-            hal_device_address,
-            register_address,
-            I2C_MEMADD_SIZE_8BIT,
-            data,
-            size);
-    }
-    else
-    {
-        hal_status = HAL_I2C_Mem_Write_DMA(handle,
-            hal_device_address,
-            register_address,
-            I2C_MEMADD_SIZE_8BIT,
-            data,
-            size);
-    }
-
-    if(hal_status != HAL_OK)
-    {
-        i2c_result result = map_hal_status(handle, hal_status);
-        cancel_active_transfer();
-        bool recovered = recover_bus();
-        xSemaphoreGive(mutex);
-        return recovered ? result : i2c_result::RECOVERY_FAILED;
-    }
-
-    TickType_t transfer_timeout =
-        milliseconds_to_ticks(transfer_timeout_ms);
-    if(xSemaphoreTake(completion_semaphore, transfer_timeout) != pdTRUE)
-    {
-        cancel_active_transfer();
-        bool recovered = recover_bus();
-        xSemaphoreGive(mutex);
-        return recovered ? i2c_result::TRANSFER_TIMEOUT :
-            i2c_result::RECOVERY_FAILED;
-    }
-
-    i2c_result result = transfer_result;
-    xSemaphoreGive(mutex);
-    return result;
-}
-
-/**
- * @brief 在异常传输后重新初始化 I2C 外设及其 DMA
- *
- * @return 恢复成功时返回 true
- */
-bool i2c_dev::recover_bus()
-{
-    bool recovered = HAL_I2C_DeInit(handle) == HAL_OK &&
-        HAL_I2C_Init(handle) == HAL_OK;
-
-    while(xSemaphoreTake(completion_semaphore, 0U) == pdTRUE)
-    {
-    }
-
-    if(!recovered)
-    {
-        initialized = false;
-    }
-
-    return recovered;
-}
-
-/**
- * @brief 在任务上下文中取消当前活动传输标记
- */
-void i2c_dev::cancel_active_transfer()
-{
-    taskENTER_CRITICAL();
-    transfer_active = false;
-    taskEXIT_CRITICAL();
-}
-
-/**
- * @brief 在中断中完成当前 I2C DMA 传输
- *
- * @param result DMA 传输结果
- */
-void i2c_dev::complete_from_isr(i2c_result result)
-{
-    if(!initialized || !transfer_active)
-    {
-        return;
-    }
-
-    transfer_result = result;
-    transfer_active = false;
-
-    BaseType_t higher_priority_task_woken = pdFALSE;
-    xSemaphoreGiveFromISR(completion_semaphore,
-        &higher_priority_task_woken);
-    portYIELD_FROM_ISR(higher_priority_task_woken);
-}
-
-/**
- * @brief 创建 I2C 总线访问对象
- *
- * @param bus_id I2C 总线编号
- */
-i2c_bus::i2c_bus(uint8_t bus_id)
-    : bus_id(bus_id)
-{
-}
-
-/**
- * @brief 初始化 I2C 总线的 FreeRTOS 同步资源
+ * @brief 初始化 ESP-IDF I2C 主机总线
  *
  * @return I2C 总线结果
  */
 i2c_result i2c_bus::init()
 {
-    i2c_dev *device = get_dev(bus_id);
-    if(!device)
+    if(bus_handle){return i2c_result::OK;}
+
+    if(port < I2C_NUM_0 || port >= I2C_NUM_MAX)
     {
         return i2c_result::INVALID_BUS;
     }
 
-    return device->init();
+    if(!GPIO_IS_VALID_OUTPUT_GPIO(sda_pin) ||
+        !GPIO_IS_VALID_OUTPUT_GPIO(scl_pin) ||
+        sda_pin == scl_pin)
+    {
+        return i2c_result::INVALID_ARGUMENT;
+    }
+
+    i2c_master_bus_config_t config = {};
+    config.i2c_port = port;
+    config.sda_io_num = sda_pin;
+    config.scl_io_num = scl_pin;
+    config.clk_source = I2C_CLK_SRC_DEFAULT;
+    config.glitch_ignore_cnt = I2C_GLITCH_IGNORE_COUNT;
+    config.intr_priority = 0;
+    config.trans_queue_depth = 0U;
+    config.flags.enable_internal_pullup = enable_internal_pullup;
+    config.flags.allow_pd = false;
+
+    esp_err_t error = i2c_new_master_bus(&config, &bus_handle);
+    if(error == ESP_ERR_INVALID_ARG){return i2c_result::INVALID_ARGUMENT;}
+    if(error != ESP_OK)
+    {
+        bus_handle = nullptr;
+        return i2c_result::INIT_FAILED;
+    }
+
+    return i2c_result::OK;
 }
 
 /**
- * @brief 使用 DMA 连续读取 I2C 设备寄存器
+ * @brief 复位 I2C 主机总线硬件状态
  *
- * @param device_address 7 位设备地址
+ * @return I2C 总线结果
+ */
+i2c_result i2c_bus::reset()
+{
+    if(!bus_handle){return i2c_result::NOT_INITIALIZED;}
+
+    return map_transfer_error(i2c_master_bus_reset(bus_handle));
+}
+
+/**
+ * @brief 创建固定地址的 I2C 从设备对象
+ *
+ * @param bus 从设备所属的物理总线
+ * @param device_address 7 位从设备地址
+ * @param scl_speed_hz SCL 时钟频率，单位 Hz
+ */
+i2c_device::i2c_device(i2c_bus &bus,
+    uint8_t device_address,
+    uint32_t scl_speed_hz)
+    : bus(bus),
+      device_address(device_address),
+      scl_speed_hz(scl_speed_hz)
+{
+}
+
+/**
+ * @brief 初始化 I2C 从设备句柄
+ *
+ * @return I2C 总线结果
+ */
+i2c_result i2c_device::init()
+{
+    if(device_handle){return i2c_result::OK;}
+
+    if(device_address > 0x7FU || scl_speed_hz == 0U)
+    {
+        return i2c_result::INVALID_ARGUMENT;
+    }
+
+    i2c_result result = bus.init();
+    if(result != i2c_result::OK){return result;}
+
+    i2c_device_config_t config = {};
+    config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    config.device_address = device_address;
+    config.scl_speed_hz = scl_speed_hz;
+    config.scl_wait_us = 0U;
+    config.flags.disable_ack_check = false;
+
+    esp_err_t error = i2c_master_bus_add_device(bus.bus_handle,
+        &config,
+        &device_handle);
+    if(error == ESP_ERR_INVALID_ARG){return i2c_result::INVALID_ARGUMENT;}
+    if(error != ESP_OK)
+    {
+        device_handle = nullptr;
+        return i2c_result::INIT_FAILED;
+    }
+
+    return i2c_result::OK;
+}
+
+/**
+ * @brief 连续读取 I2C 从设备寄存器
+ *
  * @param register_address 起始寄存器地址
  * @param data 接收缓冲区
  * @param size 接收长度
- * @param lock_timeout_ms 等待总线互斥锁的超时时间，单位毫秒
- * @param transfer_timeout_ms 等待 DMA 完成的超时时间，单位毫秒
+ * @param transfer_timeout_ms 传输超时时间，单位毫秒
  *
  * @return I2C 总线结果
  */
-i2c_result i2c_bus::read_bytes(uint8_t device_address,
-    uint8_t register_address,
+i2c_result i2c_device::read_bytes(uint8_t register_address,
     uint8_t *data,
     uint16_t size,
-    uint32_t lock_timeout_ms,
     uint32_t transfer_timeout_ms)
 {
-    i2c_dev *device = get_dev(bus_id);
-    if(!device)
+    if(!device_handle){return i2c_result::NOT_INITIALIZED;}
+    if(!data || size == 0U || transfer_timeout_ms > INT_MAX)
     {
-        return i2c_result::INVALID_BUS;
+        return i2c_result::INVALID_ARGUMENT;
     }
 
-    return device->read_bytes(device_address,
-        register_address,
+    esp_err_t error = i2c_master_transmit_receive(device_handle,
+        &register_address,
+        1U,
         data,
         size,
-        lock_timeout_ms,
-        transfer_timeout_ms);
+        static_cast<int>(transfer_timeout_ms));
+    return map_transfer_error(error);
 }
 
 /**
- * @brief 使用 DMA 连续写入 I2C 设备寄存器
+ * @brief 连续写入 I2C 从设备寄存器
  *
- * @param device_address 7 位设备地址
  * @param register_address 起始寄存器地址
  * @param data 发送缓冲区
  * @param size 发送长度
- * @param lock_timeout_ms 等待总线互斥锁的超时时间，单位毫秒
- * @param transfer_timeout_ms 等待 DMA 完成的超时时间，单位毫秒
+ * @param transfer_timeout_ms 传输超时时间，单位毫秒
  *
  * @return I2C 总线结果
  */
-i2c_result i2c_bus::write_bytes(uint8_t device_address,
-    uint8_t register_address,
+i2c_result i2c_device::write_bytes(uint8_t register_address,
     const uint8_t *data,
     uint16_t size,
-    uint32_t lock_timeout_ms,
     uint32_t transfer_timeout_ms)
 {
-    i2c_dev *device = get_dev(bus_id);
-    if(!device)
+    if(!device_handle){return i2c_result::NOT_INITIALIZED;}
+    if(!data || size == 0U || transfer_timeout_ms > INT_MAX)
     {
-        return i2c_result::INVALID_BUS;
+        return i2c_result::INVALID_ARGUMENT;
     }
 
-    return device->write_bytes(device_address,
-        register_address,
-        data,
-        size,
-        lock_timeout_ms,
-        transfer_timeout_ms);
-}
+    i2c_master_transmit_multi_buffer_info_t buffers[2]{};
+    buffers[0].write_buffer = &register_address;
+    buffers[0].buffer_size = 1U;
+    buffers[1].write_buffer = data;
+    buffers[1].buffer_size = size;
 
-/**
- * @brief 处理 I2C DMA 寄存器读取完成事件
- *
- * @param handle HAL I2C 句柄
- */
-void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *handle)
-{
-    i2c_dev *device = get_dev(handle);
-    if(device)
-    {
-        device->complete_from_isr(i2c_result::OK);
-    }
-}
-
-/**
- * @brief 处理 I2C DMA 寄存器写入完成事件
- *
- * @param handle HAL I2C 句柄
- */
-void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *handle)
-{
-    i2c_dev *device = get_dev(handle);
-    if(device)
-    {
-        device->complete_from_isr(i2c_result::OK);
-    }
-}
-
-/**
- * @brief 处理 I2C DMA 或总线错误事件
- *
- * @param handle HAL I2C 句柄
- */
-void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *handle)
-{
-    i2c_dev *device = get_dev(handle);
-    if(device)
-    {
-        device->complete_from_isr(map_hal_error(handle));
-    }
+    esp_err_t error = i2c_master_multi_buffer_transmit(device_handle,
+        buffers,
+        2U,
+        static_cast<int>(transfer_timeout_ms));
+    return map_transfer_error(error);
 }

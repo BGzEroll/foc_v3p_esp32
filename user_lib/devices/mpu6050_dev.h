@@ -6,7 +6,7 @@
 namespace mpu6050_dev
 {
     bool peek_latest(mpu6050_sample &sample);
-    void init();
+    void init(i2c_device &i2c);
 }
 
 #endif

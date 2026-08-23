@@ -2,20 +2,16 @@
 
 #include "main.h"
 #include "system/topic.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
-static constexpr uint8_t MPU6050_I2C_BUS_ID = 1U;
-static constexpr uint8_t MPU6050_I2C_ADDRESS = 0x68U;
 static constexpr float MPU6050_ACCELEROMETER_WEIGHT = 0.02f;
 static constexpr uint16_t MPU6050_TASK_STACK_DEPTH = 512U;
 static constexpr UBaseType_t MPU6050_TASK_PRIORITY = tskIDLE_PRIORITY + 3U;
 static constexpr uint32_t MPU6050_UPDATE_PERIOD_MS = 5U;
 static constexpr uint32_t MPU6050_RETRY_DELAY_MS = 1000U;
 
-static mpu6050 imu(MPU6050_I2C_BUS_ID,
-    MPU6050_I2C_ADDRESS,
-    MPU6050_ACCELEROMETER_WEIGHT);
+static mpu6050 *imu = nullptr;
 static topic::latest_topic<mpu6050_sample> sample_topic;
 
 /**
@@ -28,7 +24,7 @@ static void mpu6050_task_entry(void *argument)
     i2c_result init_result;
     do
     {
-        init_result = imu.init(true);
+        init_result = imu->init(true);
 
         if(init_result != i2c_result::OK)
         {
@@ -41,8 +37,8 @@ static void mpu6050_task_entry(void *argument)
 
     while(true)
     {
-        if(imu.update() == i2c_result::OK &&
-            !sample_topic.publish(imu.sample()))
+        if(imu->update() == i2c_result::OK &&
+            !sample_topic.publish(imu->sample()))
         {
             Error_Handler();
         }
@@ -66,9 +62,16 @@ bool mpu6050_dev::peek_latest(mpu6050_sample &sample)
 
 /**
  * @brief 初始化 MPU6050 设备、话题并创建样本生产任务
+ *
+ * @param i2c MPU6050 所使用的 I2C 从设备
  */
-void mpu6050_dev::init()
+void mpu6050_dev::init(i2c_device &i2c)
 {
+    if(imu){return;}
+
+    static mpu6050 imu_instance(i2c, MPU6050_ACCELEROMETER_WEIGHT);
+    imu = &imu_instance;
+
     if(!sample_topic.init())
     {
         Error_Handler();
