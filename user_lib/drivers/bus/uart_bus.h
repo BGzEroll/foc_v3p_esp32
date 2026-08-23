@@ -1,7 +1,9 @@
 #ifndef UART_BUS_H
 #define UART_BUS_H
 
-#include <stdint.h>
+#include <cstdint>
+#include "driver/gpio.h"
+#include "driver/uart.h"
 
 enum class uart_result : uint8_t
 {
@@ -11,45 +13,45 @@ enum class uart_result : uint8_t
     NOT_INITIALIZED,
     INVALID_CONTEXT,
     INIT_FAILED,
-    LOCK_TIMEOUT,
     READ_TIMEOUT,
     TRANSFER_TIMEOUT,
-    BUSY,
-    DMA_ERROR,
-    OVERRUN_ERROR,
-    NOISE_ERROR,
-    FRAME_ERROR,
-    PARITY_ERROR,
-    BUS_ERROR,
-    RECOVERY_FAILED
+    BUS_ERROR
 };
 
 class uart_bus
 {
     public:
-        static constexpr uint32_t DEFAULT_LOCK_TIMEOUT_MS = 10;
-        static constexpr uint32_t DEFAULT_READ_TIMEOUT_MS = 0;
-        static constexpr uint32_t DEFAULT_TRANSFER_TIMEOUT_MS = 50;
+        static constexpr uint32_t DEFAULT_READ_TIMEOUT_MS = 0U;
+        static constexpr uint32_t DEFAULT_TRANSFER_TIMEOUT_MS = 50U;
 
-        explicit uart_bus(uint8_t bus_id = 0);
+        uart_bus(uart_port_t port,
+            gpio_num_t tx_pin,
+            gpio_num_t rx_pin,
+            uint32_t baud_rate,
+            uint16_t rx_buffer_size = 1024U);
+        uart_bus(const uart_bus &) = delete;
+        uart_bus &operator=(const uart_bus &) = delete;
 
     public:
         uart_result init();
+
+    public:
         uart_result read_bytes(uint8_t *data,
             uint16_t max_size,
             uint16_t &received_size,
-            uint32_t read_timeout_ms = DEFAULT_READ_TIMEOUT_MS,
-            uint32_t lock_timeout_ms = DEFAULT_LOCK_TIMEOUT_MS);
+            uint32_t read_timeout_ms = DEFAULT_READ_TIMEOUT_MS);
         uart_result write_bytes(const uint8_t *data,
             uint16_t size,
-            uint32_t lock_timeout_ms = DEFAULT_LOCK_TIMEOUT_MS,
             uint32_t transfer_timeout_ms = DEFAULT_TRANSFER_TIMEOUT_MS);
-        uint32_t rx_dropped_bytes() const;
-        uint32_t rx_error_count() const;
-        uart_result last_rx_error() const;
+        uart_result flush_rx();
 
     private:
-        uint8_t bus_id;
+        uart_port_t port;
+        gpio_num_t tx_pin;
+        gpio_num_t rx_pin;
+        uint32_t baud_rate;
+        uint16_t rx_buffer_size;
+        bool initialized = false;
 };
 
 #endif

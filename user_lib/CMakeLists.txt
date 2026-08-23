@@ -7,11 +7,11 @@ idf_component_register(
     EXCLUDE_SRCS
         "devices/mpu6050_dev.cpp"
         "drivers/mpu6050.cpp"
-        "drivers/bus/uart_bus.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES
         esp_driver_gpio
         esp_driver_i2c
+        esp_driver_uart
         esp_timer
 )
