@@ -4,6 +4,7 @@ idf_component_register(
         "devices"
         "drivers"
         "drivers/bus"
+        "drivers/foc"
     EXCLUDE_SRCS
         "devices/mpu6050_dev.cpp"
         "drivers/mpu6050.cpp"
