@@ -1,15 +1,61 @@
 #include "foc_host_test.h"
 
 #include "../foc_core.h"
+#include "../sensors/current_sensor.h"
+#include "../sensors/rotor_sensor.h"
 #include "freertos/queue.h"
 #include <assert.h>
 #include <math.h>
 #include <atomic>
 #include <limits>
+#include <type_traits>
 #include <thread>
 
 static constexpr float TEST_TOLERANCE = 1.0e-4f;
 static constexpr float HALF_PI = 1.57079632679489661923f;
+
+class host_rotor_sensor final : public rotor_sensor
+{
+    public:
+        foc_result init() override
+        {
+            return foc_result::OK;
+        }
+
+        foc_result read(uint32_t, rotor_sample &) override
+        {
+            return foc_result::OK;
+        }
+
+        foc_result read_from_isr(uint32_t, rotor_sample &) override
+        {
+            return foc_result::OK;
+        }
+};
+
+class host_current_sensor final : public current_sensor
+{
+    public:
+        foc_result init() override
+        {
+            return foc_result::OK;
+        }
+
+        foc_result read(uint32_t, phase_current_sample &) override
+        {
+            return foc_result::OK;
+        }
+
+        foc_result read_from_isr(uint32_t, phase_current_sample &) override
+        {
+            return foc_result::OK;
+        }
+};
+
+static_assert(!std::is_abstract<host_rotor_sensor>::value,
+    "rotor_sensor task and ISR APIs must be implementable");
+static_assert(!std::is_abstract<host_current_sensor>::value,
+    "current_sensor task and ISR APIs must be implementable");
 
 struct mock_output_state
 {

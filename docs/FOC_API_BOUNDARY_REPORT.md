@@ -10,7 +10,8 @@
 ~~~
 
 当前实现允许直接依赖 ESP32/FreeRTOS，删除了原有的三缓冲交换、虚拟
-`phase_driver`、传感器读取接口和公共数学头文件。核心仍然是第一阶段的
+`phase_driver` 和公共数学头文件；传感器读取接口保留为核心之外的可选适配层。
+核心仍然是第一阶段的
 D-Q 电流环，不包含速度环、位置环和真实硬件适配器。
 
 当前仓库没有生产代码调用 FOC，因此本次 API 切换没有兼容迁移负担。
@@ -21,6 +22,9 @@ D-Q 电流环，不包含速度环、位置环和真实硬件适配器。
 user_lib/drivers/foc/
 ├── foc_core.h/.cpp                 # 公共 API、Topic、控制实现和内部数学
 ├── foc_types.h                     # 配置、样本、目标、Snapshot 和结果类型
+├── sensors/
+│   ├── rotor_sensor.h              # 可选转子传感器适配契约，不进入 foc_core
+│   └── current_sensor.h            # 可选电流传感器适配契约，不进入 foc_core
 └── tests/
     ├── foc_host_test.cpp           # 主机行为测试
     └── host_include/freertos/      # 主机测试用的 FreeRTOS Queue 替身
@@ -106,6 +110,24 @@ topics.current.publish_from_isr(sample, higher_priority_task_woken);
 
 `foc_core` 不再调用传感器的 `read()`，因此 I2C、UART 等可能阻塞的操作不
 会进入控制循环。
+
+### 3.3 可选传感器虚拟接口
+
+`rotor_sensor` 和 `current_sensor` 作为可选的应用侧适配契约保留。两个接口
+均提供任务上下文的 `read()` 和 ISR 上下文的 `read_from_isr()`。它们不属于
+`foc_core` 的成员，也不由 `foc_core` 包含、创建或调用；应用层可以选择使用
+具体驱动、回调或这两个虚拟接口完成采样，然后把成功取得的样本发布到对应
+Topic。
+
+任务上下文的 `read()` 可以执行 I2C、UART 等可能阻塞的操作。选择
+`read_from_isr()` 的驱动必须保证函数实现、虚表、对象和上下文满足 ISR 可访
+问要求，并且全调用链位于 IRAM/ROM、无阻塞、无锁、无堆分配、无日志、无延时；
+不得在其中访问 I2C 或 UART。读取函数本身只负责填写样本，ISR 中的
+`higher_priority_task_woken` 由调用方传给 `publish_from_isr()`。
+
+不支持 ISR 采样的传感器实现仍可以用于任务上下文，但应用不得在 ISR 中调用
+其 `read_from_isr()`；对于 ADC 缓存或硬件寄存器采样，则可以实现该接口并在
+读取成功后直接发布到 Topic。
 
 ## 4. 两种控制循环
 
@@ -230,7 +252,8 @@ if(access.snapshot.peek(snapshot, 0U))
 - 新增 `core_loop_from_isr()`。
 - 删除自定义 Target/Snapshot 三缓冲和相关原子变量。
 - 删除 `phase_driver` 虚拟接口。
-- 删除 `rotor_sensor`、`current_sensor` 虚拟读取接口。
+- 保留 `rotor_sensor`、`current_sensor` 作为可选适配接口，但从 `foc_core`
+  控制边界移除。
 - 删除 `foc_math.h/.cpp`。
 - 数学中间类型和函数改为 `foc_core.cpp` 内部实现。
 - 内部状态改为普通成员，由生命周期串行契约保证一致性。
@@ -247,6 +270,8 @@ if(access.snapshot.peek(snapshot, 0U))
   5 ms 边界、过流、驱动故障、故障恢复和 ISR 专用 API。
 - ESP-IDF 6.0.2 直接 CMake 构建成功。
 - ISR 测试确认核心使用 FromISR Topic API 和 ISR 输出回调。
+- 传感器虚拟接口已恢复为核心之外的可选适配层，并通过主机编译烟测确认任务
+  与 ISR 两种读取接口均可实现。
 - ESP32 FOC 对象段审计确认 `core_loop_from_isr()`、共同控制实现、数学函数和
   Topic FromISR 实例位于 `.iram1`；当前示例固件没有生产调用者，因此 FOC
   符号未被拉入最终 ELF，应用接入后仍需审计输出回调和最终链接图。
