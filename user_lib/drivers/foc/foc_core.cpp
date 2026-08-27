@@ -1,15 +1,547 @@
 #include "foc_core.h"
 
-#include "foc_math.h"
-#include <math.h>
+#if defined(ESP_PLATFORM)
+#include "esp_attr.h"
+#define FOC_IRAM_ATTR IRAM_ATTR
+#else
+#define FOC_IRAM_ATTR
+#endif
 
-static constexpr float MAX_SVPWM_VOLTAGE_RATIO =
-    0.57735026918962576451f;
+/* ---- FOC 内部数学类型和常量 ---- */
 
-static_assert(std::atomic<uint32_t>::is_always_lock_free,
-    "FOC requires lock-free 32-bit atomics");
-static_assert(std::atomic<bool>::is_always_lock_free,
-    "FOC requires lock-free boolean atomics");
+static constexpr float PI = 3.14159265358979323846f;
+static constexpr float HALF_PI = 1.57079632679489661923f;
+static constexpr float THREE_HALF_PI = 4.71238898038468985769f;
+static constexpr float TWO_PI = 6.28318530717958647692f;
+static constexpr float ONE_OVER_TWO_PI =
+    0.15915494309189533577f;
+static constexpr float TWO_OVER_THREE = 0.66666666666666666667f;
+static constexpr float SQRT_THREE_OVER_TWO = 0.86602540378443864676f;
+static constexpr float MAX_TURN_COUNT = 2147483000.0f;
+static constexpr uint32_t FLOAT_EXPONENT_MASK = 0x7f800000U;
+static constexpr uint32_t FLOAT_MANTISSA_MASK = 0x007fffffU;
+static constexpr uint32_t FLOAT_SIGN_MASK = 0x80000000U;
+
+struct alpha_beta_current
+{
+    float alpha_a = 0.0f;
+    float beta_a = 0.0f;
+};
+
+struct d_q_current
+{
+    float d_a = 0.0f;
+    float q_a = 0.0f;
+};
+
+struct d_q_voltage
+{
+    float d_v = 0.0f;
+    float q_v = 0.0f;
+};
+
+struct alpha_beta_voltage
+{
+    float alpha_v = 0.0f;
+    float beta_v = 0.0f;
+};
+
+/**
+ * @brief 在不依赖运行时库的情况下读取浮点数位模式
+ *
+ * @param value 待读取的浮点数
+ *
+ * @return IEEE 754 单精度位模式
+ */
+static uint32_t FOC_IRAM_ATTR float_to_bits(float value)
+{
+    uint32_t bits = 0U;
+    __builtin_memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+/**
+ * @brief 在不依赖运行时库的情况下构造浮点数
+ *
+ * @param bits IEEE 754 单精度位模式
+ *
+ * @return 构造出的浮点数
+ */
+static float FOC_IRAM_ATTR bits_to_float(uint32_t bits)
+{
+    float value = 0.0f;
+    __builtin_memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+/**
+ * @brief 判断浮点数是否为有限值
+ *
+ * @param value 待检查的浮点数
+ *
+ * @return 为有限值时返回 true
+ */
+static bool FOC_IRAM_ATTR is_finite_number(float value)
+{
+    return (float_to_bits(value) & FLOAT_EXPONENT_MASK) !=
+        FLOAT_EXPONENT_MASK;
+}
+
+/**
+ * @brief 计算浮点数绝对值
+ *
+ * @param value 输入浮点数
+ *
+ * @return 绝对值
+ */
+static float FOC_IRAM_ATTR absolute_value(float value)
+{
+    return bits_to_float(float_to_bits(value) & ~FLOAT_SIGN_MASK);
+}
+
+/**
+ * @brief 返回两个浮点数中的较大值
+ *
+ * @param left 左操作数
+ * @param right 右操作数
+ *
+ * @return 较大值
+ */
+static float FOC_IRAM_ATTR maximum_value(float left, float right)
+{
+    return left > right ? left : right;
+}
+
+/**
+ * @brief 返回两个浮点数中的较小值
+ *
+ * @param left 左操作数
+ * @param right 右操作数
+ *
+ * @return 较小值
+ */
+static float FOC_IRAM_ATTR minimum_value(float left, float right)
+{
+    return left < right ? left : right;
+}
+
+/**
+ * @brief 把浮点值限制在对称区间内
+ *
+ * @param value 待限制的数值
+ * @param limit 对称限幅绝对值
+ *
+ * @return 限幅后的数值
+ */
+static float FOC_IRAM_ATTR clamp_symmetric(float value, float limit)
+{
+    if(value > limit){return limit;}
+    if(value < -limit){return -limit;}
+    return value;
+}
+
+/**
+ * @brief 把占空比限制在零至一之间
+ *
+ * @param value 待限制的占空比
+ *
+ * @return 限制后的占空比
+ */
+static float FOC_IRAM_ATTR clamp_duty(float value)
+{
+    if(value > 1.0f){return 1.0f;}
+    if(value < 0.0f){return 0.0f;}
+    return value;
+}
+
+/**
+ * @brief 把角度归一化到零至二倍圆周率
+ *
+ * @param angle_rad 输入角度，单位弧度
+ * @param normalized_angle_rad 用于接收归一化角度
+ *
+ * @return 输入有效时返回 true
+ */
+static bool FOC_IRAM_ATTR normalize_angle(float angle_rad,
+    float &normalized_angle_rad)
+{
+    if(!is_finite_number(angle_rad))
+    {
+        normalized_angle_rad = 0.0f;
+        return false;
+    }
+
+    float turn_count = angle_rad * ONE_OVER_TWO_PI;
+    if(!is_finite_number(turn_count) ||
+        turn_count > MAX_TURN_COUNT || turn_count < -MAX_TURN_COUNT)
+    {
+        normalized_angle_rad = 0.0f;
+        return false;
+    }
+
+    int32_t complete_turns = static_cast<int32_t>(turn_count);
+    normalized_angle_rad = angle_rad -
+        static_cast<float>(complete_turns) * TWO_PI;
+    if(normalized_angle_rad < 0.0f)
+    {
+        normalized_angle_rad += TWO_PI;
+    }
+    if(normalized_angle_rad >= TWO_PI)
+    {
+        normalized_angle_rad -= TWO_PI;
+    }
+
+    return is_finite_number(normalized_angle_rad);
+}
+
+/**
+ * @brief 使用固定阶数多项式计算正弦和余弦
+ *
+ * @param angle_rad 输入角度，单位弧度
+ * @param sine 用于接收正弦值
+ * @param cosine 用于接收余弦值
+ *
+ * @return 输入有效时返回 true
+ */
+static bool FOC_IRAM_ATTR calculate_sin_cos(float angle_rad,
+    float &sine,
+    float &cosine)
+{
+    float normalized_angle_rad = 0.0f;
+    if(!normalize_angle(angle_rad, normalized_angle_rad))
+    {
+        sine = 0.0f;
+        cosine = 1.0f;
+        return false;
+    }
+
+    float reduced_angle_rad = normalized_angle_rad;
+    float sine_sign = 1.0f;
+    float cosine_sign = 1.0f;
+    if(normalized_angle_rad < HALF_PI)
+    {
+        reduced_angle_rad = normalized_angle_rad;
+    }
+    else if(normalized_angle_rad < PI)
+    {
+        reduced_angle_rad = PI - normalized_angle_rad;
+        cosine_sign = -1.0f;
+    }
+    else if(normalized_angle_rad < THREE_HALF_PI)
+    {
+        reduced_angle_rad = normalized_angle_rad - PI;
+        sine_sign = -1.0f;
+        cosine_sign = -1.0f;
+    }
+    else
+    {
+        reduced_angle_rad = TWO_PI - normalized_angle_rad;
+        sine_sign = -1.0f;
+    }
+
+    float angle_squared = reduced_angle_rad * reduced_angle_rad;
+    float angle_fourth = angle_squared * angle_squared;
+    float angle_sixth = angle_fourth * angle_squared;
+    float angle_eighth = angle_fourth * angle_fourth;
+    float angle_tenth = angle_eighth * angle_squared;
+    float sine_value = reduced_angle_rad *
+        (1.0f - angle_squared * 0.16666666666666666667f +
+            angle_fourth * 0.00833333333333333333f -
+            angle_sixth * 0.00019841269841269841f +
+            angle_eighth * 0.00000275573192239859f -
+            angle_tenth * 0.00000002505210838544f);
+    float cosine_value = 1.0f - angle_squared * 0.5f +
+        angle_fourth * 0.04166666666666666667f -
+        angle_sixth * 0.00138888888888888889f +
+        angle_eighth * 0.00002480158730158730f -
+        angle_tenth * 0.00000027557319223986f;
+    sine = sine_sign * sine_value;
+    cosine = cosine_sign * cosine_value;
+    return is_finite_number(sine) && is_finite_number(cosine);
+}
+
+/**
+ * @brief 使用固定次数 Newton 迭代计算正平方根倒数
+ *
+ * @param value 输入正数
+ * @param inverse_sqrt 用于接收平方根倒数
+ *
+ * @return 输入有效时返回 true
+ */
+static bool FOC_IRAM_ATTR calculate_inverse_sqrt(float value,
+    float &inverse_sqrt)
+{
+    if(!is_finite_number(value) || value <= 0.0f)
+    {
+        inverse_sqrt = 0.0f;
+        return false;
+    }
+
+    uint32_t estimate_bits = float_to_bits(value);
+    estimate_bits = 0x5f3759dfU - (estimate_bits >> 1U);
+    float estimate = bits_to_float(estimate_bits);
+    float half_value = 0.5f * value;
+    for(uint32_t iteration = 0U; iteration < 3U; iteration++)
+    {
+        estimate = estimate * (1.5f - half_value * estimate * estimate);
+    }
+
+    inverse_sqrt = estimate;
+    return is_finite_number(inverse_sqrt) && inverse_sqrt > 0.0f;
+}
+
+/**
+ * @brief 使用 Newton 迭代计算正数倒数
+ *
+ * @param value 输入正数
+ * @param reciprocal 用于接收倒数
+ *
+ * @return 输入和计算结果均有效时返回 true
+ */
+static bool FOC_IRAM_ATTR calculate_reciprocal(float value,
+    float &reciprocal)
+{
+    if(!is_finite_number(value) || value <= 0.0f)
+    {
+        reciprocal = 0.0f;
+        return false;
+    }
+
+    uint32_t estimate_bits = 0x7f000000U - float_to_bits(value);
+    float estimate = bits_to_float(estimate_bits);
+    for(uint32_t iteration = 0U; iteration < 3U; iteration++)
+    {
+        estimate = estimate * (2.0f - value * estimate);
+    }
+
+    reciprocal = estimate;
+    return is_finite_number(reciprocal) && reciprocal > 0.0f;
+}
+
+/**
+ * @brief 执行 Clarke 变换
+ *
+ * @param current 三相电流样本
+ *
+ * @return Alpha-Beta 静止坐标系电流
+ */
+static alpha_beta_current FOC_IRAM_ATTR clarke(
+    const phase_current_sample &current)
+{
+    alpha_beta_current result{};
+    result.alpha_a = TWO_OVER_THREE *
+        (current.phase_a_a - 0.5f * current.phase_b_a -
+            0.5f * current.phase_c_a);
+    result.beta_a = TWO_OVER_THREE * SQRT_THREE_OVER_TWO *
+        (current.phase_b_a - current.phase_c_a);
+    return result;
+}
+
+/**
+ * @brief 执行 Park 变换
+ *
+ * @param current Alpha-Beta 静止坐标系电流
+ * @param electrical_angle_rad 电角度，单位弧度
+ *
+ * @return D-Q 旋转坐标系电流
+ */
+static d_q_current FOC_IRAM_ATTR park(
+    const alpha_beta_current &current,
+    float electrical_angle_rad)
+{
+    float sine = 0.0f;
+    float cosine = 1.0f;
+    calculate_sin_cos(electrical_angle_rad, sine, cosine);
+
+    d_q_current result{};
+    result.d_a = current.alpha_a * cosine + current.beta_a * sine;
+    result.q_a = -current.alpha_a * sine + current.beta_a * cosine;
+    return result;
+}
+
+/**
+ * @brief 执行反 Park 变换
+ *
+ * @param voltage D-Q 旋转坐标系电压
+ * @param electrical_angle_rad 电角度，单位弧度
+ *
+ * @return Alpha-Beta 静止坐标系电压
+ */
+static alpha_beta_voltage FOC_IRAM_ATTR inverse_park(
+    const d_q_voltage &voltage,
+    float electrical_angle_rad)
+{
+    float sine = 0.0f;
+    float cosine = 1.0f;
+    calculate_sin_cos(electrical_angle_rad, sine, cosine);
+
+    alpha_beta_voltage result{};
+    result.alpha_v = voltage.d_v * cosine - voltage.q_v * sine;
+    result.beta_v = voltage.d_v * sine + voltage.q_v * cosine;
+    return result;
+}
+
+/**
+ * @brief 运行一次带积分限幅和输出限幅的 PI 控制器
+ *
+ * @param target 控制目标
+ * @param measured 实际测量值
+ * @param period_s 控制周期，单位秒
+ * @param config PI 参数
+ * @param output_limit_v 输出绝对值限制，单位伏特
+ * @param integral PI 积分状态
+ * @param output 用于接收本周期输出
+ *
+ * @return 输入和计算结果均有效时返回 true
+ */
+static bool FOC_IRAM_ATTR run_pi(float target,
+    float measured,
+    float period_s,
+    const pi_config &config,
+    float output_limit_v,
+    float &integral,
+    float &output)
+{
+    if(!is_finite_number(target) || !is_finite_number(measured) ||
+        !is_finite_number(period_s) || period_s <= 0.0f ||
+        !is_finite_number(config.kp) || config.kp < 0.0f ||
+        !is_finite_number(config.ki) || config.ki < 0.0f ||
+        !is_finite_number(config.integral_limit) ||
+            config.integral_limit < 0.0f ||
+        !is_finite_number(output_limit_v) || output_limit_v <= 0.0f ||
+        !is_finite_number(integral))
+    {
+        integral = 0.0f;
+        output = 0.0f;
+        return false;
+    }
+
+    float error = target - measured;
+    float integral_candidate = integral + config.ki * error * period_s;
+    integral = clamp_symmetric(integral_candidate,
+        config.integral_limit);
+    output = clamp_symmetric(config.kp * error + integral,
+        output_limit_v);
+
+    if(!is_finite_number(integral) || !is_finite_number(output))
+    {
+        integral = 0.0f;
+        output = 0.0f;
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief 按矢量幅值限制 D-Q 电压
+ *
+ * @param voltage 待限制的 D-Q 电压
+ * @param magnitude_limit_v 电压矢量幅值上限，单位伏特
+ *
+ * @return 输入和计算结果均有效时返回 true
+ */
+static bool FOC_IRAM_ATTR limit_voltage(d_q_voltage &voltage,
+    float magnitude_limit_v)
+{
+    if(!is_finite_number(voltage.d_v) || !is_finite_number(voltage.q_v) ||
+        !is_finite_number(magnitude_limit_v) || magnitude_limit_v <= 0.0f)
+    {
+        voltage = {};
+        return false;
+    }
+
+    float magnitude_squared_v2 = voltage.d_v * voltage.d_v +
+        voltage.q_v * voltage.q_v;
+    float limit_squared_v2 = magnitude_limit_v * magnitude_limit_v;
+    if(!is_finite_number(magnitude_squared_v2) ||
+        !is_finite_number(limit_squared_v2))
+    {
+        voltage = {};
+        return false;
+    }
+    if(magnitude_squared_v2 <= limit_squared_v2){return true;}
+
+    float inverse_magnitude = 0.0f;
+    if(!calculate_inverse_sqrt(magnitude_squared_v2,
+        inverse_magnitude))
+    {
+        voltage = {};
+        return false;
+    }
+
+    float scale = magnitude_limit_v * inverse_magnitude;
+    voltage.d_v *= scale;
+    voltage.q_v *= scale;
+    return is_finite_number(voltage.d_v) &&
+        is_finite_number(voltage.q_v);
+}
+
+/**
+ * @brief 使用零序注入计算三相中心对齐 PWM 占空比
+ *
+ * @param voltage Alpha-Beta 静止坐标系电压
+ * @param bus_voltage_v 母线电压，单位伏特
+ * @param duty 用于接收三相占空比
+ *
+ * @return 输入有效且未发生占空比限幅时返回 true
+ */
+static bool FOC_IRAM_ATTR svpwm(const alpha_beta_voltage &voltage,
+    float bus_voltage_v,
+    phase_duty &duty)
+{
+    if(!is_finite_number(voltage.alpha_v) ||
+        !is_finite_number(voltage.beta_v) ||
+        !is_finite_number(bus_voltage_v) || bus_voltage_v <= 0.0f)
+    {
+        duty = {};
+        return false;
+    }
+
+    float phase_a_voltage_v = voltage.alpha_v;
+    float phase_b_voltage_v = -0.5f * voltage.alpha_v +
+        SQRT_THREE_OVER_TWO * voltage.beta_v;
+    float phase_c_voltage_v = -0.5f * voltage.alpha_v -
+        SQRT_THREE_OVER_TWO * voltage.beta_v;
+    float maximum_voltage_v = maximum_value(phase_a_voltage_v,
+        maximum_value(phase_b_voltage_v, phase_c_voltage_v));
+    float minimum_voltage_v = minimum_value(phase_a_voltage_v,
+        minimum_value(phase_b_voltage_v, phase_c_voltage_v));
+    float common_mode_voltage_v = -0.5f *
+        (maximum_voltage_v + minimum_voltage_v);
+    float reciprocal_bus_voltage = 0.0f;
+    if(!calculate_reciprocal(bus_voltage_v, reciprocal_bus_voltage))
+    {
+        duty = {};
+        return false;
+    }
+    float phase_a_duty = 0.5f +
+        (phase_a_voltage_v + common_mode_voltage_v) *
+            reciprocal_bus_voltage;
+    float phase_b_duty = 0.5f +
+        (phase_b_voltage_v + common_mode_voltage_v) *
+            reciprocal_bus_voltage;
+    float phase_c_duty = 0.5f +
+        (phase_c_voltage_v + common_mode_voltage_v) *
+            reciprocal_bus_voltage;
+    if(!is_finite_number(phase_a_duty) ||
+        !is_finite_number(phase_b_duty) ||
+        !is_finite_number(phase_c_duty))
+    {
+        duty = {};
+        return false;
+    }
+
+    bool output_in_range = phase_a_duty >= 0.0f && phase_a_duty <= 1.0f &&
+        phase_b_duty >= 0.0f && phase_b_duty <= 1.0f &&
+        phase_c_duty >= 0.0f && phase_c_duty <= 1.0f;
+    duty.phase_a = clamp_duty(phase_a_duty);
+    duty.phase_b = clamp_duty(phase_b_duty);
+    duty.phase_c = clamp_duty(phase_c_duty);
+    return output_in_range;
+}
+
+/* ---- foc_core 内部状态和校验 ---- */
 
 /**
  * @brief 检查 FOC 配置是否满足第一阶段电流环约束
@@ -20,144 +552,182 @@ static_assert(std::atomic<bool>::is_always_lock_free,
  */
 bool foc_core::valid_config(const foc_config &config) const
 {
-    bool d_axis_pi_valid = isfinite(config.d_axis_pi.kp) &&
+    bool d_axis_pi_valid = is_finite_number(config.d_axis_pi.kp) &&
         config.d_axis_pi.kp >= 0.0f &&
-        isfinite(config.d_axis_pi.ki) &&
+        is_finite_number(config.d_axis_pi.ki) &&
         config.d_axis_pi.ki >= 0.0f &&
-        isfinite(config.d_axis_pi.integral_limit) &&
+        is_finite_number(config.d_axis_pi.integral_limit) &&
         config.d_axis_pi.integral_limit >= 0.0f;
-    bool q_axis_pi_valid = isfinite(config.q_axis_pi.kp) &&
+    bool q_axis_pi_valid = is_finite_number(config.q_axis_pi.kp) &&
         config.q_axis_pi.kp >= 0.0f &&
-        isfinite(config.q_axis_pi.ki) &&
+        is_finite_number(config.q_axis_pi.ki) &&
         config.q_axis_pi.ki >= 0.0f &&
-        isfinite(config.q_axis_pi.integral_limit) &&
+        is_finite_number(config.q_axis_pi.integral_limit) &&
         config.q_axis_pi.integral_limit >= 0.0f;
     float maximum_svpwm_voltage_v = config.bus_voltage_v *
         MAX_SVPWM_VOLTAGE_RATIO;
 
     return config.pole_pairs > 0U &&
         (config.rotor_direction == 1 || config.rotor_direction == -1) &&
-        isfinite(config.electrical_zero_offset_rad) &&
-        isfinite(config.control_period_s) && config.control_period_s > 0.0f &&
-        isfinite(config.bus_voltage_v) && config.bus_voltage_v > 0.0f &&
-        isfinite(config.voltage_limit_v) && config.voltage_limit_v > 0.0f &&
+        is_finite_number(config.electrical_zero_offset_rad) &&
+        is_finite_number(config.control_period_s) &&
+            config.control_period_s > 0.0f &&
+        is_finite_number(config.bus_voltage_v) &&
+            config.bus_voltage_v > 0.0f &&
+        is_finite_number(config.voltage_limit_v) &&
+            config.voltage_limit_v > 0.0f &&
         config.voltage_limit_v <= maximum_svpwm_voltage_v &&
-        isfinite(config.max_phase_current_a) &&
-        config.max_phase_current_a > 0.0f &&
+        is_finite_number(config.max_phase_current_a) &&
+            config.max_phase_current_a > 0.0f &&
         d_axis_pi_valid && q_axis_pi_valid;
 }
 
 /**
- * @brief 将一条完整目标命令发布到三槽无锁缓冲区
+ * @brief 检查 Target 是否满足电流环输入约束
  *
- * @param target 待发布目标
+ * @param target 待检查的目标
  *
- * @return 发布结果
+ * @return 目标有效时返回 true
  */
-foc_result foc_core::publish_target(const foc_target &target)
+bool FOC_IRAM_ATTR foc_core::valid_target(const foc_target &target) const
 {
-    if(target_writer_busy_.test_and_set(std::memory_order_acquire))
+    if(target.mode != foc_control_mode::DISABLED &&
+        target.mode != foc_control_mode::CURRENT)
     {
-        return foc_result::NOT_READY;
+        return false;
     }
-
-    uint32_t published_index = published_target_index_.load(
-        std::memory_order_acquire);
-    uint32_t reader_index = target_reader_index_.load(
-        std::memory_order_acquire);
-    uint32_t write_index = INVALID_BUFFER_INDEX;
-
-    for(uint32_t index = 0U; index < BUFFER_COUNT; index++)
+    if(!is_finite_number(target.d_axis_current_a) ||
+        !is_finite_number(target.q_axis_current_a))
     {
-        if(index != published_index && index != reader_index)
-        {
-            write_index = index;
-            break;
-        }
+        return false;
     }
+    if(target.mode == foc_control_mode::DISABLED){return true;}
 
-    if(write_index == INVALID_BUFFER_INDEX)
-    {
-        target_writer_busy_.clear(std::memory_order_release);
-        return foc_result::NOT_READY;
-    }
-
-    foc_target published_target = target;
-    published_target.sequence = target_command_sequence_.fetch_add(1U,
-        std::memory_order_relaxed) + 1U;
-    target_buffers_[write_index] = published_target;
-    published_target_index_.store(write_index, std::memory_order_release);
-    target_writer_busy_.clear(std::memory_order_release);
-    return foc_result::OK;
+    float target_magnitude_squared_a2 =
+        target.d_axis_current_a * target.d_axis_current_a +
+        target.q_axis_current_a * target.q_axis_current_a;
+    float current_limit_squared_a2 = config_.max_phase_current_a *
+        config_.max_phase_current_a;
+    return is_finite_number(target_magnitude_squared_a2) &&
+        is_finite_number(current_limit_squared_a2) &&
+        target_magnitude_squared_a2 <= current_limit_squared_a2;
 }
 
 /**
- * @brief 从三槽无锁缓冲区读取一条完整目标命令
+ * @brief 检查转子样本有效性和时间新鲜度
  *
- * @param target 用于接收目标命令
+ * @param sample 待检查的转子样本
+ * @param timestamp_us 当前控制周期时间戳，单位微秒
  *
- * @return 在有限次数内读到当前发布版本时返回 true
+ * @return 样本可用于控制时返回 true
  */
-bool foc_core::load_target(foc_target &target)
+bool FOC_IRAM_ATTR foc_core::valid_rotor_sample(
+    const rotor_sample &sample,
+    uint32_t timestamp_us) const
 {
-    for(uint32_t attempt = 0U; attempt < READ_ATTEMPT_COUNT; attempt++)
-    {
-        uint32_t published_index = published_target_index_.load(
-            std::memory_order_acquire);
-        target_reader_index_.store(published_index,
-            std::memory_order_release);
-
-        if(published_index == published_target_index_.load(
-            std::memory_order_acquire))
-        {
-            target = target_buffers_[published_index];
-            target_reader_index_.store(INVALID_BUFFER_INDEX,
-                std::memory_order_release);
-            return true;
-        }
-
-        target_reader_index_.store(INVALID_BUFFER_INDEX,
-            std::memory_order_release);
-    }
-
-    target = active_target_;
-    return false;
+    uint32_t sample_age_us = timestamp_us - sample.timestamp_us;
+    return sample.valid && sample_age_us <= SENSOR_TIMEOUT_US &&
+        is_finite_number(sample.mechanical_angle_rad) &&
+        is_finite_number(sample.mechanical_velocity_rad_s);
 }
 
 /**
- * @brief 读取转子样本并计算电角度和电角速度
+ * @brief 检查电流样本有效性和时间新鲜度
  *
- * @param timestamp_us 本控制周期时间戳，单位微秒
+ * @param sample 待检查的电流样本
+ * @param timestamp_us 当前控制周期时间戳，单位微秒
+ *
+ * @return 样本可用于控制时返回 true
+ */
+bool FOC_IRAM_ATTR foc_core::valid_current_sample(
+    const phase_current_sample &sample,
+    uint32_t timestamp_us) const
+{
+    uint32_t sample_age_us = timestamp_us - sample.timestamp_us;
+    return sample.valid && sample_age_us <= SENSOR_TIMEOUT_US &&
+        is_finite_number(sample.phase_a_a) &&
+        is_finite_number(sample.phase_b_a) &&
+        is_finite_number(sample.phase_c_a);
+}
+
+/**
+ * @brief 获取运行时中最近的样本时间戳
+ *
+ * @return 最近样本时间戳，单位微秒
+ */
+uint32_t foc_core::latest_timestamp_us() const
+{
+    return runtime_.rotor.timestamp_us > runtime_.current.timestamp_us ?
+        runtime_.rotor.timestamp_us : runtime_.current.timestamp_us;
+}
+
+/**
+ * @brief 发布 Disabled Target 并同步当前活动目标
+ */
+void foc_core::publish_disabled_target()
+{
+    foc_target disabled_target{};
+    disabled_target.sequence = ++target_sequence_;
+    target_topic_.publish(disabled_target);
+    active_target_ = disabled_target;
+}
+
+/**
+ * @brief 清零 PI、控制电压并恢复中性占空比
+ */
+void FOC_IRAM_ATTR foc_core::reset_control_output()
+{
+    runtime_.u_d_v = 0.0f;
+    runtime_.u_q_v = 0.0f;
+    runtime_.u_alpha_v = 0.0f;
+    runtime_.u_beta_v = 0.0f;
+    runtime_.d_integral = 0.0f;
+    runtime_.q_integral = 0.0f;
+    runtime_.duty = {};
+}
+
+/**
+ * @brief 关闭功率输出并进入故障状态
+ *
+ * @param fault 需要记录的故障位
+ */
+void FOC_IRAM_ATTR foc_core::enter_fault(foc_fault fault)
+{
+    fault_flags_ |= foc_fault_mask(fault);
+    if(output_.disable)
+    {
+        output_.disable(output_.context);
+    }
+    output_active_ = false;
+    active_target_ = {};
+    reset_control_output();
+    state_ = foc_state::FAULT;
+}
+
+/**
+ * @brief 读取一个转子样本并计算电角度
+ *
+ * @param sample 转子样本
  *
  * @return 转子更新结果
  */
-foc_result foc_core::update_rotor(uint32_t timestamp_us)
+foc_result FOC_IRAM_ATTR foc_core::update_rotor(
+    const rotor_sample &sample)
 {
-    foc_result result = hardware_.rotor_sensor->read(timestamp_us,
-        runtime_.rotor);
-    if(result != foc_result::OK || !runtime_.rotor.valid)
-    {
-        return foc_result::SENSOR_ERROR;
-    }
-
-    if(!isfinite(runtime_.rotor.mechanical_angle_rad) ||
-        !isfinite(runtime_.rotor.mechanical_velocity_rad_s))
-    {
-        return foc_result::INVALID_NUMBER;
-    }
-
+    runtime_.rotor = sample;
     float direction = static_cast<float>(config_.rotor_direction);
     float pole_pairs = static_cast<float>(config_.pole_pairs);
     float electrical_angle_rad = direction * pole_pairs *
-        runtime_.rotor.mechanical_angle_rad -
-        config_.electrical_zero_offset_rad;
-    runtime_.electrical_angle_rad = foc_math::normalize_angle(
-        electrical_angle_rad);
+        sample.mechanical_angle_rad - config_.electrical_zero_offset_rad;
+    if(!normalize_angle(electrical_angle_rad,
+        runtime_.electrical_angle_rad))
+    {
+        return foc_result::INVALID_NUMBER;
+    }
     runtime_.electrical_velocity_rad_s = direction * pole_pairs *
-        runtime_.rotor.mechanical_velocity_rad_s;
-
-    if(!isfinite(runtime_.electrical_angle_rad) ||
-        !isfinite(runtime_.electrical_velocity_rad_s))
+        sample.mechanical_velocity_rad_s;
+    if(!is_finite_number(runtime_.electrical_angle_rad) ||
+        !is_finite_number(runtime_.electrical_velocity_rad_s))
     {
         return foc_result::INVALID_NUMBER;
     }
@@ -168,29 +738,24 @@ foc_result foc_core::update_rotor(uint32_t timestamp_us)
 /**
  * @brief 读取三相电流并执行基础数值和过流检查
  *
- * @param timestamp_us 本控制周期时间戳，单位微秒
+ * @param sample 三相电流样本
+ * @param timestamp_us 当前控制周期时间戳，单位微秒
  *
  * @return 电流更新结果
  */
-foc_result foc_core::update_current(uint32_t timestamp_us)
+foc_result FOC_IRAM_ATTR foc_core::update_current(
+    const phase_current_sample &sample,
+    uint32_t timestamp_us)
 {
-    foc_result result = hardware_.current_sensor->read(timestamp_us,
-        runtime_.current);
-    if(result != foc_result::OK || !runtime_.current.valid)
+    runtime_.current = sample;
+    if(!valid_current_sample(sample, timestamp_us))
     {
         return foc_result::SENSOR_ERROR;
     }
 
-    if(!isfinite(runtime_.current.phase_a_a) ||
-        !isfinite(runtime_.current.phase_b_a) ||
-        !isfinite(runtime_.current.phase_c_a))
-    {
-        return foc_result::INVALID_NUMBER;
-    }
-
-    if(fabsf(runtime_.current.phase_a_a) > config_.max_phase_current_a ||
-        fabsf(runtime_.current.phase_b_a) > config_.max_phase_current_a ||
-        fabsf(runtime_.current.phase_c_a) > config_.max_phase_current_a)
+    if(absolute_value(sample.phase_a_a) > config_.max_phase_current_a ||
+        absolute_value(sample.phase_b_a) > config_.max_phase_current_a ||
+        absolute_value(sample.phase_c_a) > config_.max_phase_current_a)
     {
         return foc_result::OUTPUT_RANGE;
     }
@@ -199,23 +764,34 @@ foc_result foc_core::update_current(uint32_t timestamp_us)
 }
 
 /**
+ * @brief 检查功率级是否报告硬件故障
+ *
+ * @return 功率级故障有效时返回 true
+ */
+bool FOC_IRAM_ATTR foc_core::output_fault_active() const
+{
+    return output_.fault_active && output_.fault_active(output_.context);
+}
+
+/**
  * @brief 执行 Clarke、Park 和 D-Q 电流 PI 运算
  *
  * @return 电流控制计算结果
  */
-foc_result foc_core::run_current_control()
+foc_result FOC_IRAM_ATTR foc_core::run_current_control()
 {
-    alpha_beta_current stationary_current = foc_math::clarke(
-        runtime_.current);
-    d_q_current rotating_current = foc_math::park(stationary_current,
+    alpha_beta_current stationary_current = clarke(runtime_.current);
+    d_q_current rotating_current = park(stationary_current,
         runtime_.electrical_angle_rad);
     runtime_.i_alpha_a = stationary_current.alpha_a;
     runtime_.i_beta_a = stationary_current.beta_a;
     runtime_.i_d_a = rotating_current.d_a;
     runtime_.i_q_a = rotating_current.q_a;
 
-    if(!isfinite(runtime_.i_alpha_a) || !isfinite(runtime_.i_beta_a) ||
-        !isfinite(runtime_.i_d_a) || !isfinite(runtime_.i_q_a))
+    if(!is_finite_number(runtime_.i_alpha_a) ||
+        !is_finite_number(runtime_.i_beta_a) ||
+        !is_finite_number(runtime_.i_d_a) ||
+        !is_finite_number(runtime_.i_q_a))
     {
         return foc_result::INVALID_NUMBER;
     }
@@ -228,22 +804,19 @@ foc_result foc_core::run_current_control()
         runtime_.u_q_v = 0.0f;
         return foc_result::OK;
     }
-
     if(active_target_.mode != foc_control_mode::CURRENT)
     {
         return foc_result::INVALID_STATE;
     }
 
-    bool d_axis_valid = foc_math::run_pi(
-        active_target_.d_axis_current_a,
+    bool d_axis_valid = run_pi(active_target_.d_axis_current_a,
         runtime_.i_d_a,
         config_.control_period_s,
         config_.d_axis_pi,
         config_.voltage_limit_v,
         runtime_.d_integral,
         runtime_.u_d_v);
-    bool q_axis_valid = foc_math::run_pi(
-        active_target_.q_axis_current_a,
+    bool q_axis_valid = run_pi(active_target_.q_axis_current_a,
         runtime_.i_q_a,
         config_.control_period_s,
         config_.q_axis_pi,
@@ -258,11 +831,10 @@ foc_result foc_core::run_current_control()
     d_q_voltage voltage{};
     voltage.d_v = runtime_.u_d_v;
     voltage.q_v = runtime_.u_q_v;
-    if(!foc_math::limit_voltage(voltage, config_.voltage_limit_v))
+    if(!limit_voltage(voltage, config_.voltage_limit_v))
     {
         return foc_result::INVALID_NUMBER;
     }
-
     runtime_.u_d_v = voltage.d_v;
     runtime_.u_q_v = voltage.q_v;
     return foc_result::OK;
@@ -273,48 +845,107 @@ foc_result foc_core::run_current_control()
  *
  * @return 输出计算结果
  */
-foc_result foc_core::calculate_output()
+foc_result FOC_IRAM_ATTR foc_core::calculate_output()
 {
     d_q_voltage rotating_voltage{};
     rotating_voltage.d_v = runtime_.u_d_v;
     rotating_voltage.q_v = runtime_.u_q_v;
-    alpha_beta_voltage stationary_voltage = foc_math::inverse_park(
-        rotating_voltage,
+    alpha_beta_voltage stationary_voltage = inverse_park(rotating_voltage,
         runtime_.electrical_angle_rad);
     runtime_.u_alpha_v = stationary_voltage.alpha_v;
     runtime_.u_beta_v = stationary_voltage.beta_v;
 
-    if(!isfinite(runtime_.u_alpha_v) || !isfinite(runtime_.u_beta_v))
+    if(!is_finite_number(runtime_.u_alpha_v) ||
+        !is_finite_number(runtime_.u_beta_v))
     {
         runtime_.duty = {};
         return foc_result::INVALID_NUMBER;
     }
-
-    if(!foc_math::svpwm(stationary_voltage,
-        config_.bus_voltage_v,
-        runtime_.duty))
+    if(!svpwm(stationary_voltage, config_.bus_voltage_v, runtime_.duty))
     {
         return foc_result::OUTPUT_RANGE;
     }
-
     return foc_result::OK;
 }
 
+/* ---- foc_core Topic 和控制循环 ---- */
+
 /**
- * @brief 将本周期占空比提交给三相驱动
+ * @brief 从 Target Topic 读取最新控制目标
  *
- * @return 驱动输出结果
+ * @param target 用于接收目标
+ *
+ * @return 成功读取时返回 true
  */
-foc_result foc_core::apply_output()
+template<bool FROM_ISR>
+bool FOC_IRAM_ATTR foc_core::load_target(foc_target &target)
 {
-    if(hardware_.phase_driver->fault_active())
+    if constexpr(FROM_ISR)
+    {
+        return target_topic_.peek_from_isr(target);
+    }
+    else
+    {
+        return target_topic_.peek(target, 0U);
+    }
+}
+
+/**
+ * @brief 从转子 Topic 读取最新转子样本
+ *
+ * @param sample 用于接收转子样本
+ *
+ * @return 成功读取时返回 true
+ */
+template<bool FROM_ISR>
+bool FOC_IRAM_ATTR foc_core::load_rotor(rotor_sample &sample)
+{
+    if constexpr(FROM_ISR)
+    {
+        return rotor_topic_.peek_from_isr(sample);
+    }
+    else
+    {
+        return rotor_topic_.peek(sample, 0U);
+    }
+}
+
+/**
+ * @brief 从电流 Topic 读取最新三相电流样本
+ *
+ * @param sample 用于接收三相电流样本
+ *
+ * @return 成功读取时返回 true
+ */
+template<bool FROM_ISR>
+bool FOC_IRAM_ATTR foc_core::load_current(
+    phase_current_sample &sample)
+{
+    if constexpr(FROM_ISR)
+    {
+        return current_topic_.peek_from_isr(sample);
+    }
+    else
+    {
+        return current_topic_.peek(sample, 0U);
+    }
+}
+
+/**
+ * @brief 将本周期占空比提交给功率输出
+ *
+ * @return 输出结果
+ */
+template<bool FROM_ISR>
+foc_result FOC_IRAM_ATTR foc_core::apply_output()
+{
+    if(output_fault_active())
     {
         return foc_result::DRIVER_FAULT;
     }
-
-    if(!isfinite(runtime_.duty.phase_a) ||
-        !isfinite(runtime_.duty.phase_b) ||
-        !isfinite(runtime_.duty.phase_c) ||
+    if(!is_finite_number(runtime_.duty.phase_a) ||
+        !is_finite_number(runtime_.duty.phase_b) ||
+        !is_finite_number(runtime_.duty.phase_c) ||
         runtime_.duty.phase_a < 0.0f || runtime_.duty.phase_a > 1.0f ||
         runtime_.duty.phase_b < 0.0f || runtime_.duty.phase_b > 1.0f ||
         runtime_.duty.phase_c < 0.0f || runtime_.duty.phase_c > 1.0f)
@@ -322,9 +953,83 @@ foc_result foc_core::apply_output()
         return foc_result::OUTPUT_RANGE;
     }
 
-    foc_result result = hardware_.phase_driver->set_duty(runtime_.duty);
+    foc_result result = foc_result::DRIVER_FAULT;
+    if constexpr(FROM_ISR)
+    {
+        result = output_.apply_duty_from_isr(output_.context,
+            runtime_.duty);
+    }
+    else
+    {
+        result = output_.apply_duty(output_.context, runtime_.duty);
+    }
     return result == foc_result::OK ? foc_result::OK :
         foc_result::DRIVER_FAULT;
+}
+
+/**
+ * @brief 发布当前完整运行状态到 Snapshot Topic
+ *
+ * @param timestamp_us 快照时间戳，单位微秒
+ * @param higher_priority_task_woken ISR 唤醒标记
+ * @param force 是否忽略降频间隔立即发布
+ */
+template<bool FROM_ISR>
+void FOC_IRAM_ATTR foc_core::publish_snapshot(uint32_t timestamp_us,
+    BaseType_t *higher_priority_task_woken,
+    bool force)
+{
+    if(!force && snapshot_has_timestamp_ &&
+        static_cast<uint32_t>(timestamp_us - last_snapshot_timestamp_us_) <
+            SNAPSHOT_PERIOD_US)
+    {
+        return;
+    }
+
+    foc_snapshot snapshot{};
+    snapshot.sequence = snapshot_sequence_ + 1U;
+    snapshot.timestamp_us = timestamp_us;
+    snapshot.state = state_;
+    snapshot.fault_flags = fault_flags_;
+    snapshot.output_active = output_active_ &&
+        state_ == foc_state::RUNNING;
+    snapshot.mechanical_angle_rad = runtime_.rotor.mechanical_angle_rad;
+    snapshot.mechanical_velocity_rad_s =
+        runtime_.rotor.mechanical_velocity_rad_s;
+    snapshot.electrical_angle_rad = runtime_.electrical_angle_rad;
+    snapshot.electrical_velocity_rad_s =
+        runtime_.electrical_velocity_rad_s;
+    snapshot.phase_a_current_a = runtime_.current.phase_a_a;
+    snapshot.phase_b_current_a = runtime_.current.phase_b_a;
+    snapshot.phase_c_current_a = runtime_.current.phase_c_a;
+    snapshot.i_alpha_a = runtime_.i_alpha_a;
+    snapshot.i_beta_a = runtime_.i_beta_a;
+    snapshot.i_d_a = runtime_.i_d_a;
+    snapshot.i_q_a = runtime_.i_q_a;
+    snapshot.target_i_d_a = active_target_.d_axis_current_a;
+    snapshot.target_i_q_a = active_target_.q_axis_current_a;
+    snapshot.u_d_v = runtime_.u_d_v;
+    snapshot.u_q_v = runtime_.u_q_v;
+    snapshot.duty = runtime_.duty;
+    snapshot.bus_voltage_v = config_.bus_voltage_v;
+    snapshot.bus_current_a = 0.0f;
+
+    bool published = false;
+    if constexpr(FROM_ISR)
+    {
+        if(!higher_priority_task_woken){return;}
+        published = snapshot_topic_.publish_from_isr(snapshot,
+            *higher_priority_task_woken);
+    }
+    else
+    {
+        published = snapshot_topic_.publish(snapshot);
+    }
+    if(!published){return;}
+
+    snapshot_sequence_ = snapshot.sequence;
+    last_snapshot_timestamp_us_ = timestamp_us;
+    snapshot_has_timestamp_ = true;
 }
 
 /**
@@ -333,203 +1038,226 @@ foc_result foc_core::apply_output()
  * @param fault 本周期故障位
  * @param result 返回给调用方的错误结果
  * @param timestamp_us 本控制周期时间戳，单位微秒
+ * @param higher_priority_task_woken ISR 唤醒标记
  *
  * @return 传入的错误结果
  */
-foc_result foc_core::fail_control_cycle(foc_fault fault,
+template<bool FROM_ISR>
+foc_result FOC_IRAM_ATTR foc_core::fail_control_cycle(
+    foc_fault fault,
     foc_result result,
-    uint32_t timestamp_us)
+    uint32_t timestamp_us,
+    BaseType_t *higher_priority_task_woken)
 {
     enter_fault(fault);
-    publish_snapshot(timestamp_us);
-    runtime_.control_sequence++;
+    publish_snapshot<FROM_ISR>(timestamp_us,
+        higher_priority_task_woken,
+        true);
     return result;
 }
 
 /**
- * @brief 关闭功率输出并进入故障状态
+ * @brief 执行一次固定顺序的 FOC 控制周期
  *
- * @param fault 需要记录的故障位
+ * @param timestamp_us 本控制周期时间戳，单位微秒
+ * @param higher_priority_task_woken ISR 唤醒标记
+ *
+ * @return 本控制周期结果
  */
-void foc_core::enter_fault(foc_fault fault)
+template<bool FROM_ISR>
+foc_result FOC_IRAM_ATTR foc_core::run_control_loop(
+    uint32_t timestamp_us,
+    BaseType_t *higher_priority_task_woken)
 {
-    fault_flags_.fetch_or(foc_fault_mask(fault),
-        std::memory_order_relaxed);
-    if(hardware_.phase_driver)
+    if(!initialized_ || state_ == foc_state::UNINITIALIZED)
     {
-        hardware_.phase_driver->disable();
+        return foc_result::NOT_INITIALIZED;
     }
-    output_active_.store(false, std::memory_order_release);
-    reset_control_output();
-    state_value_.store(static_cast<uint32_t>(foc_state::FAULT),
-        std::memory_order_release);
-}
-
-/**
- * @brief 清零 PI、控制电压并恢复中性占空比
- */
-void foc_core::reset_control_output()
-{
-    runtime_.u_d_v = 0.0f;
-    runtime_.u_q_v = 0.0f;
-    runtime_.u_alpha_v = 0.0f;
-    runtime_.u_beta_v = 0.0f;
-    runtime_.d_integral = 0.0f;
-    runtime_.q_integral = 0.0f;
-    runtime_.duty = {};
-}
-
-/**
- * @brief 将当前完整运行状态发布到三槽无锁快照缓冲区
- *
- * @param timestamp_us 快照时间戳，单位微秒
- */
-void foc_core::publish_snapshot(uint32_t timestamp_us)
-{
-    uint32_t published_index = published_snapshot_index_.load(
-        std::memory_order_acquire);
-    uint32_t write_index = INVALID_BUFFER_INDEX;
-
-    for(uint32_t index = 0U; index < BUFFER_COUNT; index++)
+    if(state_ == foc_state::READY){return foc_result::NOT_READY;}
+    if(state_ != foc_state::RUNNING)
     {
-        if(index != published_index &&
-            snapshot_reader_counts_[index].load(
-                std::memory_order_acquire) == 0U)
-        {
-            write_index = index;
-            break;
-        }
+        return foc_result::INVALID_STATE;
+    }
+    if(output_fault_active())
+    {
+        return fail_control_cycle<FROM_ISR>(foc_fault::DRIVER,
+            foc_result::DRIVER_FAULT,
+            timestamp_us,
+            higher_priority_task_woken);
     }
 
-    if(write_index == INVALID_BUFFER_INDEX){return;}
+    foc_target target{};
+    if(!load_target<FROM_ISR>(target) || !valid_target(target))
+    {
+        return fail_control_cycle<FROM_ISR>(foc_fault::INTERNAL,
+            foc_result::INTERNAL_ERROR,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
+    active_target_ = target;
 
-    foc_snapshot next_snapshot{};
-    next_snapshot.sequence = ++snapshot_publish_sequence_;
-    next_snapshot.timestamp_us = timestamp_us;
-    next_snapshot.state = state();
-    next_snapshot.fault_flags = faults();
-    next_snapshot.output_active = output_active_.load(
-        std::memory_order_acquire) &&
-        next_snapshot.state == foc_state::RUNNING;
-    next_snapshot.mechanical_angle_rad =
-        runtime_.rotor.mechanical_angle_rad;
-    next_snapshot.mechanical_velocity_rad_s =
-        runtime_.rotor.mechanical_velocity_rad_s;
-    next_snapshot.electrical_angle_rad = runtime_.electrical_angle_rad;
-    next_snapshot.electrical_velocity_rad_s =
-        runtime_.electrical_velocity_rad_s;
-    next_snapshot.phase_a_current_a = runtime_.current.phase_a_a;
-    next_snapshot.phase_b_current_a = runtime_.current.phase_b_a;
-    next_snapshot.phase_c_current_a = runtime_.current.phase_c_a;
-    next_snapshot.i_alpha_a = runtime_.i_alpha_a;
-    next_snapshot.i_beta_a = runtime_.i_beta_a;
-    next_snapshot.i_d_a = runtime_.i_d_a;
-    next_snapshot.i_q_a = runtime_.i_q_a;
-    next_snapshot.target_i_d_a = active_target_.d_axis_current_a;
-    next_snapshot.target_i_q_a = active_target_.q_axis_current_a;
-    next_snapshot.u_d_v = runtime_.u_d_v;
-    next_snapshot.u_q_v = runtime_.u_q_v;
-    next_snapshot.duty = runtime_.duty;
-    next_snapshot.bus_voltage_v = config_.bus_voltage_v;
-    next_snapshot.bus_current_a = 0.0f;
+    rotor_sample rotor{};
+    if(!load_rotor<FROM_ISR>(rotor) ||
+        !valid_rotor_sample(rotor, timestamp_us))
+    {
+        return fail_control_cycle<FROM_ISR>(foc_fault::ROTOR_SENSOR,
+            foc_result::SENSOR_ERROR,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
+    foc_result result = update_rotor(rotor);
+    if(result != foc_result::OK)
+    {
+        return fail_control_cycle<FROM_ISR>(foc_fault::INVALID_NUMBER,
+            result,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
 
-    snapshot_buffers_[write_index] = next_snapshot;
-    published_snapshot_index_.store(write_index,
-        std::memory_order_release);
-    snapshot_ready_.store(true, std::memory_order_release);
+    phase_current_sample current{};
+    if(!load_current<FROM_ISR>(current) ||
+        !valid_current_sample(current, timestamp_us))
+    {
+        return fail_control_cycle<FROM_ISR>(foc_fault::CURRENT_SENSOR,
+            foc_result::SENSOR_ERROR,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
+    result = update_current(current, timestamp_us);
+    if(result == foc_result::OUTPUT_RANGE)
+    {
+        return fail_control_cycle<FROM_ISR>(foc_fault::OVER_CURRENT,
+            result,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
+    if(result != foc_result::OK)
+    {
+        return fail_control_cycle<FROM_ISR>(foc_fault::INVALID_NUMBER,
+            result,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
+
+    result = run_current_control();
+    if(result != foc_result::OK)
+    {
+        foc_fault fault = result == foc_result::INVALID_STATE ?
+            foc_fault::INTERNAL : foc_fault::INVALID_NUMBER;
+        return fail_control_cycle<FROM_ISR>(fault,
+            result,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
+
+    result = calculate_output();
+    if(result != foc_result::OK)
+    {
+        foc_fault fault = result == foc_result::OUTPUT_RANGE ?
+            foc_fault::OUTPUT_RANGE : foc_fault::INVALID_NUMBER;
+        return fail_control_cycle<FROM_ISR>(fault,
+            result,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
+
+    result = apply_output<FROM_ISR>();
+    if(result != foc_result::OK)
+    {
+        foc_fault fault = result == foc_result::OUTPUT_RANGE ?
+            foc_fault::OUTPUT_RANGE : foc_fault::DRIVER;
+        return fail_control_cycle<FROM_ISR>(fault,
+            result,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
+    if(output_fault_active())
+    {
+        return fail_control_cycle<FROM_ISR>(foc_fault::DRIVER,
+            foc_result::DRIVER_FAULT,
+            timestamp_us,
+            higher_priority_task_woken);
+    }
+
+    publish_snapshot<FROM_ISR>(timestamp_us,
+        higher_priority_task_woken,
+        false);
+    return active_target_.mode == foc_control_mode::DISABLED ?
+        foc_result::DISABLED : foc_result::OK;
 }
 
-/**
- * @brief 获取当前运行时中最近的样本时间戳
- *
- * @return 最近样本时间戳，单位微秒
- */
-uint32_t foc_core::latest_timestamp_us() const
-{
-    return runtime_.rotor.timestamp_us > runtime_.current.timestamp_us ?
-        runtime_.rotor.timestamp_us : runtime_.current.timestamp_us;
-}
+/* ---- foc_core 公共 API ---- */
 
 /**
- * @brief 初始化单个 FOC 实例及其硬件抽象
+ * @brief 初始化单个 FOC 实例及其 Topic 和功率输出
  *
  * @param config 电机和电流环配置
- * @param hardware 该实例独占使用的硬件接口
+ * @param output 功率输出回调
  *
  * @return 初始化结果
  */
 foc_result foc_core::init(const foc_config &config,
-    const foc_hardware &hardware)
+    const foc_output &output)
 {
-    if(state() != foc_state::UNINITIALIZED)
+    if(state_ != foc_state::UNINITIALIZED)
     {
         return foc_result::INVALID_STATE;
     }
-
-    if(!hardware.rotor_sensor || !hardware.current_sensor ||
-        !hardware.phase_driver)
+    if(!valid_config(config))
+    {
+        return foc_result::INVALID_CONFIG;
+    }
+    if(!output.init || !output.enable || !output.disable ||
+        !output.apply_duty || !output.apply_duty_from_isr ||
+        !output.fault_active)
     {
         return foc_result::INVALID_ARGUMENT;
     }
 
-    if(!valid_config(config)){return foc_result::INVALID_CONFIG;}
-
     config_ = config;
-    hardware_ = hardware;
+    output_ = output;
     runtime_ = {};
     active_target_ = {};
-    snapshot_publish_sequence_ = 0U;
-    fault_flags_.store(0U, std::memory_order_relaxed);
-    output_active_.store(false, std::memory_order_relaxed);
-    target_command_sequence_.store(0U, std::memory_order_relaxed);
-    published_target_index_.store(0U, std::memory_order_relaxed);
-    target_reader_index_.store(INVALID_BUFFER_INDEX,
-        std::memory_order_relaxed);
-    target_writer_busy_.clear(std::memory_order_relaxed);
-    target_force_disabled_.store(true, std::memory_order_relaxed);
-    published_snapshot_index_.store(0U, std::memory_order_relaxed);
-    snapshot_ready_.store(false, std::memory_order_relaxed);
+    fault_flags_ = 0U;
+    output_active_ = false;
+    initialized_ = false;
+    target_sequence_ = 0U;
+    snapshot_sequence_ = 0U;
+    last_snapshot_timestamp_us_ = 0U;
+    snapshot_has_timestamp_ = false;
 
-    for(uint32_t index = 0U; index < BUFFER_COUNT; index++)
+    bool topics_ready = target_topic_.init() && rotor_topic_.init() &&
+        current_topic_.init() && snapshot_topic_.init();
+    if(!topics_ready)
     {
-        target_buffers_[index] = {};
-        snapshot_buffers_[index] = {};
-        snapshot_reader_counts_[index].store(0U,
-            std::memory_order_relaxed);
+        return foc_result::INTERNAL_ERROR;
+    }
+    initialized_ = true;
+
+    foc_target disabled_target{};
+    if(!target_topic_.publish(disabled_target) ||
+        !rotor_topic_.publish(rotor_sample{}) ||
+        !current_topic_.publish(phase_current_sample{}))
+    {
+        initialized_ = false;
+        return foc_result::INTERNAL_ERROR;
     }
 
-    foc_result result = hardware_.rotor_sensor->init();
+    foc_result result = output_.init(output_.context);
     if(result != foc_result::OK)
     {
-        fault_flags_.store(foc_fault_mask(foc_fault::ROTOR_SENSOR),
-            std::memory_order_relaxed);
-        publish_snapshot(0U);
-        return foc_result::SENSOR_ERROR;
-    }
-
-    result = hardware_.current_sensor->init();
-    if(result != foc_result::OK)
-    {
-        fault_flags_.store(foc_fault_mask(foc_fault::CURRENT_SENSOR),
-            std::memory_order_relaxed);
-        publish_snapshot(0U);
-        return foc_result::SENSOR_ERROR;
-    }
-
-    result = hardware_.phase_driver->init();
-    if(result != foc_result::OK)
-    {
-        fault_flags_.store(foc_fault_mask(foc_fault::DRIVER),
-            std::memory_order_relaxed);
-        hardware_.phase_driver->disable();
-        publish_snapshot(0U);
+        fault_flags_ = foc_fault_mask(foc_fault::DRIVER);
+        state_ = foc_state::FAULT;
+        output_.disable(output_.context);
+        publish_snapshot<false>(0U, nullptr, true);
+        initialized_ = false;
+        state_ = foc_state::UNINITIALIZED;
         return foc_result::DRIVER_FAULT;
     }
 
-    hardware_.phase_driver->disable();
-    state_value_.store(static_cast<uint32_t>(foc_state::READY),
-        std::memory_order_release);
-    publish_snapshot(0U);
+    output_.disable(output_.context);
+    state_ = foc_state::READY;
+    publish_snapshot<false>(0U, nullptr, true);
     return foc_result::OK;
 }
 
@@ -537,108 +1265,103 @@ foc_result foc_core::init(const foc_config &config,
  * @brief 以中性占空比安全开启功率级
  *
  * @return 使能结果
+ *
+ * @note 调用前必须停止本实例控制 ISR，并确认 ISR 已经执行结束。
  */
 foc_result foc_core::enable()
 {
-    if(state() == foc_state::UNINITIALIZED)
+    if(!initialized_ || state_ == foc_state::UNINITIALIZED)
     {
         return foc_result::NOT_INITIALIZED;
     }
-    if(state() != foc_state::READY){return foc_result::INVALID_STATE;}
-    if(target_force_disabled_.load(std::memory_order_acquire))
-    {
-        return foc_result::DISABLED;
-    }
+    if(state_ != foc_state::READY){return foc_result::INVALID_STATE;}
 
     foc_target target{};
-    if(!load_target(target)){return foc_result::NOT_READY;}
+    if(!target_topic_.peek(target, 0U)){return foc_result::NOT_READY;}
     if(target.mode != foc_control_mode::CURRENT)
     {
         return foc_result::DISABLED;
     }
-    active_target_ = target;
-
-    if(hardware_.phase_driver->fault_active())
+    if(!valid_target(target))
+    {
+        return foc_result::INVALID_ARGUMENT;
+    }
+    if(output_fault_active())
     {
         enter_fault(foc_fault::DRIVER);
-        publish_snapshot(latest_timestamp_us());
+        publish_snapshot<false>(latest_timestamp_us(), nullptr, true);
         return foc_result::DRIVER_FAULT;
     }
 
+    active_target_ = target;
     reset_control_output();
-    foc_result result = hardware_.phase_driver->set_duty(runtime_.duty);
+    foc_result result = output_.apply_duty(output_.context,
+        runtime_.duty);
     if(result != foc_result::OK)
     {
         enter_fault(foc_fault::DRIVER);
-        publish_snapshot(latest_timestamp_us());
+        publish_snapshot<false>(latest_timestamp_us(), nullptr, true);
         return foc_result::DRIVER_FAULT;
     }
 
-    result = hardware_.phase_driver->enable();
-    if(result != foc_result::OK || hardware_.phase_driver->fault_active())
+    result = output_.enable(output_.context);
+    if(result != foc_result::OK || output_fault_active())
     {
         enter_fault(foc_fault::DRIVER);
-        publish_snapshot(latest_timestamp_us());
+        publish_snapshot<false>(latest_timestamp_us(), nullptr, true);
         return foc_result::DRIVER_FAULT;
     }
 
-    output_active_.store(true, std::memory_order_release);
-    state_value_.store(static_cast<uint32_t>(foc_state::RUNNING),
-        std::memory_order_release);
-    publish_snapshot(latest_timestamp_us());
+    output_active_ = true;
+    state_ = foc_state::RUNNING;
+    publish_snapshot<false>(latest_timestamp_us(), nullptr, true);
     return foc_result::OK;
 }
 
 /**
  * @brief 立即关闭功率输出并清除控制输出状态
+ *
+ * @note 调用前必须停止本实例控制 ISR，并确认 ISR 已经执行结束。
  */
 void foc_core::disable()
 {
-    foc_state current_state = state();
-    if(current_state == foc_state::UNINITIALIZED){return;}
+    if(!initialized_ || state_ == foc_state::UNINITIALIZED){return;}
 
-    hardware_.phase_driver->disable();
-    output_active_.store(false, std::memory_order_release);
-    target_force_disabled_.store(true, std::memory_order_release);
-
-    if(current_state == foc_state::RUNNING)
+    output_.disable(output_.context);
+    output_active_ = false;
+    if(state_ == foc_state::RUNNING)
     {
-        state_value_.store(static_cast<uint32_t>(foc_state::READY),
-            std::memory_order_release);
+        state_ = foc_state::READY;
     }
-
-    foc_target disabled_target{};
-    publish_target(disabled_target);
-    active_target_ = disabled_target;
+    publish_disabled_target();
     reset_control_output();
-    publish_snapshot(latest_timestamp_us());
+    publish_snapshot<false>(latest_timestamp_us(), nullptr, true);
 }
 
 /**
- * @brief 向高频环无锁发布一条完整控制目标
+ * @brief 向 Target Topic 发布一条经过校验的控制目标
  *
  * @param target 待发布控制目标
  *
  * @return 目标检查和发布结果
+ *
+ * @note 本函数使用任务上下文 Queue API，不能从 ISR 调用。FAULT 状态下必须
+ *       先调用 clear_fault()。
  */
 foc_result foc_core::set_target(const foc_target &target)
 {
-    foc_state current_state = state();
-    if(current_state == foc_state::UNINITIALIZED)
+    if(!initialized_ || state_ == foc_state::UNINITIALIZED)
     {
         return foc_result::NOT_INITIALIZED;
     }
-    if(current_state == foc_state::FAULT)
-    {
-        return foc_result::INVALID_STATE;
-    }
+    if(state_ == foc_state::FAULT){return foc_result::INVALID_STATE;}
     if(target.mode != foc_control_mode::DISABLED &&
         target.mode != foc_control_mode::CURRENT)
     {
         return foc_result::INVALID_ARGUMENT;
     }
-    if(!isfinite(target.d_axis_current_a) ||
-        !isfinite(target.q_axis_current_a))
+    if(!is_finite_number(target.d_axis_current_a) ||
+        !is_finite_number(target.q_axis_current_a))
     {
         return foc_result::INVALID_NUMBER;
     }
@@ -648,236 +1371,80 @@ foc_result foc_core::set_target(const foc_target &target)
     {
         checked_target.d_axis_current_a = 0.0f;
         checked_target.q_axis_current_a = 0.0f;
-        target_force_disabled_.store(true, std::memory_order_release);
     }
-    else
+    else if(!valid_target(checked_target))
     {
-        float target_magnitude_squared_a2 =
-            checked_target.d_axis_current_a *
-                checked_target.d_axis_current_a +
-            checked_target.q_axis_current_a *
-                checked_target.q_axis_current_a;
-        float current_limit_squared_a2 = config_.max_phase_current_a *
-            config_.max_phase_current_a;
-        if(!isfinite(target_magnitude_squared_a2) ||
-            target_magnitude_squared_a2 > current_limit_squared_a2)
-        {
-            return foc_result::OUTPUT_RANGE;
-        }
+        return foc_result::OUTPUT_RANGE;
     }
 
-    foc_result result = publish_target(checked_target);
-    if(result == foc_result::OK &&
-        checked_target.mode == foc_control_mode::CURRENT)
-    {
-        target_force_disabled_.store(false, std::memory_order_release);
-    }
-    return result;
+    checked_target.sequence = ++target_sequence_;
+    return target_topic_.publish(checked_target) ? foc_result::OK :
+        foc_result::NOT_READY;
 }
 
 /**
- * @brief 执行一次固定顺序的高频电流 FOC 控制周期
+ * @brief 执行一次任务上下文 FOC 控制周期
  *
  * @param timestamp_us 本控制周期时间戳，单位微秒
  *
  * @return 本控制周期结果
  */
-foc_result foc_core::high_freq_loop(uint32_t timestamp_us)
+foc_result foc_core::core_loop(uint32_t timestamp_us)
 {
-    foc_state current_state = state();
-    if(current_state == foc_state::UNINITIALIZED)
-    {
-        return foc_result::NOT_INITIALIZED;
-    }
-    if(current_state == foc_state::READY){return foc_result::NOT_READY;}
-    if(current_state != foc_state::RUNNING)
-    {
-        return foc_result::INVALID_STATE;
-    }
-
-    if(!hardware_.rotor_sensor || !hardware_.current_sensor ||
-        !hardware_.phase_driver)
-    {
-        return fail_control_cycle(foc_fault::INTERNAL,
-            foc_result::INTERNAL_ERROR,
-            timestamp_us);
-    }
-    if(hardware_.phase_driver->fault_active())
-    {
-        return fail_control_cycle(foc_fault::DRIVER,
-            foc_result::DRIVER_FAULT,
-            timestamp_us);
-    }
-
-    foc_target target{};
-    load_target(target);
-    if(target_force_disabled_.load(std::memory_order_acquire))
-    {
-        target = {};
-    }
-    active_target_ = target;
-
-    foc_result result = update_rotor(timestamp_us);
-    if(result == foc_result::SENSOR_ERROR)
-    {
-        return fail_control_cycle(foc_fault::ROTOR_SENSOR,
-            result,
-            timestamp_us);
-    }
-    if(result != foc_result::OK)
-    {
-        return fail_control_cycle(foc_fault::INVALID_NUMBER,
-            result,
-            timestamp_us);
-    }
-
-    result = update_current(timestamp_us);
-    if(result == foc_result::SENSOR_ERROR)
-    {
-        return fail_control_cycle(foc_fault::CURRENT_SENSOR,
-            result,
-            timestamp_us);
-    }
-    if(result == foc_result::OUTPUT_RANGE)
-    {
-        return fail_control_cycle(foc_fault::OVER_CURRENT,
-            result,
-            timestamp_us);
-    }
-    if(result != foc_result::OK)
-    {
-        return fail_control_cycle(foc_fault::INVALID_NUMBER,
-            result,
-            timestamp_us);
-    }
-
-    result = run_current_control();
-    if(result != foc_result::OK)
-    {
-        foc_fault fault = result == foc_result::INVALID_STATE ?
-            foc_fault::INTERNAL : foc_fault::INVALID_NUMBER;
-        return fail_control_cycle(fault, result, timestamp_us);
-    }
-
-    result = calculate_output();
-    if(result != foc_result::OK)
-    {
-        foc_fault fault = result == foc_result::OUTPUT_RANGE ?
-            foc_fault::OUTPUT_RANGE : foc_fault::INVALID_NUMBER;
-        return fail_control_cycle(fault, result, timestamp_us);
-    }
-
-    result = apply_output();
-    if(result != foc_result::OK)
-    {
-        foc_fault fault = result == foc_result::OUTPUT_RANGE ?
-            foc_fault::OUTPUT_RANGE : foc_fault::DRIVER;
-        return fail_control_cycle(fault, result, timestamp_us);
-    }
-
-    if(hardware_.phase_driver->fault_active())
-    {
-        return fail_control_cycle(foc_fault::DRIVER,
-            foc_result::DRIVER_FAULT,
-            timestamp_us);
-    }
-
-    publish_snapshot(timestamp_us);
-    runtime_.control_sequence++;
-    return active_target_.mode == foc_control_mode::DISABLED ?
-        foc_result::DISABLED : foc_result::OK;
+    return run_control_loop<false>(timestamp_us, nullptr);
 }
 
 /**
- * @brief 无锁复制最近一次完整控制快照
+ * @brief 执行一次 ISR 上下文 FOC 控制周期
  *
- * @param output 用于接收快照
+ * @param timestamp_us 本控制周期时间戳，单位微秒
+ * @param higher_priority_task_woken ISR 唤醒标记
  *
- * @return 成功取得完整快照时返回 true
+ * @return 本控制周期结果
+ *
+ * @note 本函数不调用 portYIELD_FROM_ISR()；调用方应在 ISR 结束前统一处理
+ *       higher_priority_task_woken。调用链不得执行阻塞、分配或任务上下文操作。
  */
-bool foc_core::snapshot(foc_snapshot &output) const
+foc_result FOC_IRAM_ATTR foc_core::core_loop_from_isr(
+    uint32_t timestamp_us,
+    BaseType_t &higher_priority_task_woken)
 {
-    if(!snapshot_ready_.load(std::memory_order_acquire)){return false;}
-
-    for(uint32_t attempt = 0U; attempt < READ_ATTEMPT_COUNT; attempt++)
-    {
-        uint32_t published_index = published_snapshot_index_.load(
-            std::memory_order_acquire);
-        snapshot_reader_counts_[published_index].fetch_add(1U,
-            std::memory_order_acq_rel);
-
-        if(published_index == published_snapshot_index_.load(
-            std::memory_order_acquire))
-        {
-            output = snapshot_buffers_[published_index];
-            snapshot_reader_counts_[published_index].fetch_sub(1U,
-                std::memory_order_release);
-            return true;
-        }
-
-        snapshot_reader_counts_[published_index].fetch_sub(1U,
-            std::memory_order_release);
-    }
-
-    return false;
+    return run_control_loop<true>(timestamp_us,
+        &higher_priority_task_woken);
 }
 
 /**
- * @brief 获取当前 FOC 生命周期状态
+ * @brief 获取本实例对外开放的 Topic
  *
- * @return 当前状态
+ * @return 转子、电流和 Snapshot Topic 引用
  */
-foc_state foc_core::state() const
+foc_topic_access foc_core::topics()
 {
-    return static_cast<foc_state>(state_value_.load(
-        std::memory_order_acquire));
+    return foc_topic_access{rotor_topic_, current_topic_, snapshot_topic_};
 }
 
 /**
- * @brief 获取当前故障位集合
- *
- * @return foc_fault 位掩码
- */
-uint32_t foc_core::faults() const
-{
-    return fault_flags_.load(std::memory_order_acquire);
-}
-
-/**
- * @brief 在功率输出关闭且驱动故障解除后清除故障
+ * @brief 在功率输出关闭且硬件故障解除后清除故障
  *
  * @return 故障清除结果
+ *
+ * @note 调用前必须停止本实例控制 ISR，并确认 ISR 已经执行结束。
  */
 foc_result foc_core::clear_fault()
 {
-    if(state() == foc_state::UNINITIALIZED)
+    if(!initialized_ || state_ == foc_state::UNINITIALIZED)
     {
         return foc_result::NOT_INITIALIZED;
     }
-    if(state() != foc_state::FAULT){return foc_result::INVALID_STATE;}
-    if(output_active_.load(std::memory_order_acquire))
-    {
-        return foc_result::INVALID_STATE;
-    }
-    if(!hardware_.rotor_sensor || !hardware_.current_sensor ||
-        !hardware_.phase_driver)
-    {
-        return foc_result::INTERNAL_ERROR;
-    }
-    if(hardware_.phase_driver->fault_active())
-    {
-        return foc_result::DRIVER_FAULT;
-    }
+    if(state_ != foc_state::FAULT){return foc_result::INVALID_STATE;}
+    if(output_active_){return foc_result::INVALID_STATE;}
+    if(output_fault_active()){return foc_result::DRIVER_FAULT;}
 
-    hardware_.phase_driver->disable();
-    target_force_disabled_.store(true, std::memory_order_release);
-    foc_target disabled_target{};
-    publish_target(disabled_target);
-    active_target_ = disabled_target;
+    output_.disable(output_.context);
+    publish_disabled_target();
     reset_control_output();
-    fault_flags_.store(0U, std::memory_order_release);
-    state_value_.store(static_cast<uint32_t>(foc_state::READY),
-        std::memory_order_release);
-    publish_snapshot(latest_timestamp_us());
+    fault_flags_ = 0U;
+    state_ = foc_state::READY;
+    publish_snapshot<false>(latest_timestamp_us(), nullptr, true);
     return foc_result::OK;
 }

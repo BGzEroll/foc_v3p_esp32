@@ -6,6 +6,13 @@
 #include <stdint.h>
 #include <type_traits>
 
+#if defined(ESP_PLATFORM)
+#include "esp_attr.h"
+#define TOPIC_IRAM_ATTR IRAM_ATTR
+#else
+#define TOPIC_IRAM_ATTR
+#endif
+
 namespace topic
 {
     /**
@@ -92,7 +99,7 @@ namespace topic
              * @note 调用方必须在首次使用前将 higher_priority_task_woken 初始化为
              *       pdFALSE，并在退出 ISR 前调用 portYIELD_FROM_ISR()。
              */
-            bool publish_from_isr(const item_type &item,
+            bool TOPIC_IRAM_ATTR publish_from_isr(const item_type &item,
                 BaseType_t &higher_priority_task_woken)
             {
                 if(!queue_handle){return false;}
@@ -108,7 +115,7 @@ namespace topic
              *
              * @return 成功取得快照时返回 true
              */
-            bool peek_from_isr(item_type &item) const
+            bool TOPIC_IRAM_ATTR peek_from_isr(item_type &item) const
             {
                 if(!queue_handle){return false;}
                 return xQueuePeekFromISR(queue_handle, &item) == pdPASS;
@@ -217,7 +224,7 @@ namespace topic
              *
              * @return 成功写入消息时返回 true
              */
-            bool publish_from_isr(const item_type &item,
+            bool TOPIC_IRAM_ATTR publish_from_isr(const item_type &item,
                 BaseType_t &higher_priority_task_woken)
             {
                 if(!queue_handle){return false;}
@@ -230,11 +237,10 @@ namespace topic
              * @brief 在中断上下文读取并移除 FIFO 队首消息
              *
              * @param item 用于接收消息的对象
-             * @param higher_priority_task_woken 高优先级任务唤醒标记
              *
              * @return 成功取得消息时返回 true
              */
-            bool receive_from_isr(item_type &item,
+            bool TOPIC_IRAM_ATTR receive_from_isr(item_type &item,
                 BaseType_t &higher_priority_task_woken)
             {
                 if(!queue_handle){return false;}
@@ -271,5 +277,7 @@ namespace topic
             QueueHandle_t queue_handle = nullptr;
     };
 }
+
+#undef TOPIC_IRAM_ATTR
 
 #endif
