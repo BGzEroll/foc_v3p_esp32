@@ -4,6 +4,36 @@
 
 static constexpr uint8_t I2C_GLITCH_IGNORE_COUNT = 7;
 
+struct i2c_bus_record
+{
+    i2c_master_bus_handle_t bus_handle = nullptr;
+    gpio_num_t sda_pin = static_cast<gpio_num_t>(-1);
+    gpio_num_t scl_pin = static_cast<gpio_num_t>(-1);
+    bool enable_internal_pullup = false;
+};
+
+static i2c_bus_record i2c_bus_records[I2C_NUM_MAX] = {};
+
+/**
+ * @brief 判断总线配置是否与已登记配置一致
+ *
+ * @param record 已登记的总线记录
+ * @param sda_pin 待使用的 SDA GPIO
+ * @param scl_pin 待使用的 SCL GPIO
+ * @param enable_internal_pullup 待使用的内部上拉配置
+ *
+ * @return 配置一致时返回 true
+ */
+static bool bus_configuration_matches(const i2c_bus_record &record,
+    gpio_num_t sda_pin,
+    gpio_num_t scl_pin,
+    bool enable_internal_pullup)
+{
+    return record.sda_pin == sda_pin &&
+           record.scl_pin == scl_pin &&
+           record.enable_internal_pullup == enable_internal_pullup;
+}
+
 /**
  * @brief 将 ESP-IDF I2C 传输结果转换为总线结果
  *
@@ -55,11 +85,11 @@ i2c_bus::i2c_bus(i2c_port_num_t port,
 }
 
 /**
- * @brief 初始化 ESP-IDF I2C 主机总线
+ * @brief 确保 ESP-IDF I2C 主机总线已经初始化
  *
  * @return I2C 总线结果
  */
-i2c_result i2c_bus::init()
+i2c_result i2c_bus::ensure_initialized()
 {
     if(bus_handle){return i2c_result::OK;}
 
@@ -75,6 +105,21 @@ i2c_result i2c_bus::init()
         return i2c_result::INVALID_ARGUMENT;
     }
 
+    i2c_bus_record &record = i2c_bus_records[port];
+    if(record.bus_handle)
+    {
+        if(!bus_configuration_matches(record,
+            sda_pin,
+            scl_pin,
+            enable_internal_pullup))
+        {
+            return i2c_result::CONFIG_CONFLICT;
+        }
+
+        bus_handle = record.bus_handle;
+        return i2c_result::OK;
+    }
+
     i2c_master_bus_config_t config = {};
     config.i2c_port = port;
     config.sda_io_num = sda_pin;
@@ -86,13 +131,19 @@ i2c_result i2c_bus::init()
     config.flags.enable_internal_pullup = enable_internal_pullup;
     config.flags.allow_pd = false;
 
-    esp_err_t error = i2c_new_master_bus(&config, &bus_handle);
+    esp_err_t error = i2c_new_master_bus(&config, &record.bus_handle);
     if(error == ESP_ERR_INVALID_ARG){return i2c_result::INVALID_ARGUMENT;}
+    if(error == ESP_ERR_INVALID_STATE){return i2c_result::CONFIG_CONFLICT;}
     if(error != ESP_OK)
     {
-        bus_handle = nullptr;
+        record.bus_handle = nullptr;
         return i2c_result::INIT_FAILED;
     }
+
+    record.sda_pin = sda_pin;
+    record.scl_pin = scl_pin;
+    record.enable_internal_pullup = enable_internal_pullup;
+    bus_handle = record.bus_handle;
 
     return i2c_result::OK;
 }
@@ -139,7 +190,7 @@ i2c_result i2c_device::init()
         return i2c_result::INVALID_ARGUMENT;
     }
 
-    i2c_result result = bus.init();
+    i2c_result result = bus.ensure_initialized();
     if(result != i2c_result::OK){return result;}
 
     i2c_device_config_t config = {};

@@ -14,7 +14,8 @@ enum class i2c_result : uint8_t
     INIT_FAILED,
     TRANSFER_TIMEOUT,
     NACK,
-    BUS_ERROR
+    BUS_ERROR,
+    CONFIG_CONFLICT
 };
 
 class i2c_device;
@@ -30,13 +31,12 @@ class i2c_bus
         i2c_bus &operator=(const i2c_bus &) = delete;
 
     public:
-        i2c_result init();
-
-    public:
         i2c_result reset();
 
     private:
         friend class i2c_device;
+
+        i2c_result ensure_initialized();
 
         i2c_port_num_t port;
         gpio_num_t sda_pin;
