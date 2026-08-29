@@ -21,6 +21,7 @@
 #include "freertos/task.h"
 #include "soc/gpio_struct.h"
 #include "soc/soc_caps.h"
+#include <atomic>
 #include <cstdint>
 
 /* ---- 硬件引脚和测试参数 ---- */
@@ -71,12 +72,13 @@ static constexpr UBaseType_t CONTROL_TASK_PRIORITY =
 
 static constexpr float PI = 3.14159265358979323846f;
 static constexpr float TWO_PI = 6.28318530717958647692f;
+static constexpr float RAD_PER_SECOND_TO_RPM = 60.0f / TWO_PI;
 static constexpr float SQRT_THREE_OVER_TWO = 0.86602540378443864676f;
 
 static constexpr uint8_t MOTOR_POLE_PAIRS = 7;
 static constexpr int8_t MOTOR_ROTOR_DIRECTION = 1;
 static constexpr float MOTOR_BUS_VOLTAGE_V = 12.0f;
-static constexpr float MOTOR_VOLTAGE_LIMIT_V = 2.0f;
+static constexpr float MOTOR_VOLTAGE_LIMIT_V = 4.0f;
 static constexpr float MOTOR_MAX_PHASE_CURRENT_A = 0.2f;
 static constexpr uint32_t FOC_CONTROL_FREQUENCY_HZ = PWM_FREQUENCY_HZ;
 static constexpr uint32_t FOC_CONTROL_PERIOD_US =
@@ -95,6 +97,11 @@ static constexpr float SPEED_PI_KP_A_PER_RAD_S = 0.01f;
 static constexpr float SPEED_PI_KI_A_PER_RAD_S2 = 0.005f;
 static constexpr float SPEED_PI_INTEGRAL_LIMIT_A = 0.003f;
 static constexpr float MOTOR_MAX_MECHANICAL_SPEED_RAD_S = 30.0f;
+// 允许采样瞬时速度高于保护阈值，用于过滤明显错误的角度跳变。
+static constexpr float ENCODER_MAX_SAMPLE_SPEED_RAD_S = 120.0f;
+static constexpr uint32_t SPEED_OVERSPEED_CONFIRMATION_COUNT = 3;
+static constexpr uint32_t SPEED_LOG_WINDOW_MAX_US = 2000000;
+// 当前已验证 0.5 系数能够可靠起转，后续再单独优化速度反馈平滑度。
 static constexpr float SPEED_FILTER_ALPHA = 0.5f;
 static constexpr uint32_t VELOCITY_ESTIMATION_PERIOD_US = 20000;
 static constexpr float STARTUP_KICK_Q_CURRENT_A = 0.05f;
@@ -172,6 +179,8 @@ static bool encoder_velocity_reference_valid = false;
 static float encoder_velocity_reference_angle_rad = 0.0f;
 static int64_t encoder_velocity_reference_timestamp_us = 0;
 static float encoder_velocity_rad_s = 0.0f;
+static std::atomic<uint32_t> encoder_rejected_sample_count{0};
+static volatile float speed_feedback_for_log_rad_s = 0.0f;
 static uint32_t sample_sequence = 0;
 static int32_t bus_sense_voltage_mv = 0;
 static bool bus_sense_read_valid = false;
@@ -1402,6 +1411,9 @@ static void reset_encoder_tracking()
     encoder_velocity_rad_s = 0.0f;
 }
 
+static bool start_pwm_carrier_for_alignment();
+static bool stop_pwm_carrier_for_alignment();
+
 /**
  * @brief 根据固定 Alpha 轴电压矢量执行转子对齐
  *
@@ -1420,17 +1432,24 @@ static bool align_sensor(float &electrical_zero_offset_rad)
         return false;
     }
 
-    if(!enable_power_stage())
+    if(!start_pwm_carrier_for_alignment())
     {
-        ESP_LOGE(TAG, "传感器对齐时无法打开驱动器");
-        disable_power_stage();
+        ESP_LOGE(TAG, "传感器对齐时无法启动 PWM 载波");
         return false;
     }
 
     if(write_pwm_duty(alignment_duty) != foc_result::OK)
     {
         ESP_LOGE(TAG, "输出传感器对齐电压失败");
+        stop_pwm_carrier_for_alignment();
+        return false;
+    }
+
+    if(!enable_power_stage())
+    {
+        ESP_LOGE(TAG, "传感器对齐时无法打开驱动器");
         disable_power_stage();
+        stop_pwm_carrier_for_alignment();
         return false;
     }
 
@@ -1446,6 +1465,7 @@ static bool align_sensor(float &electrical_zero_offset_rad)
         {
             ESP_LOGE(TAG, "传感器对齐时无法读取电流");
             disable_power_stage();
+            stop_pwm_carrier_for_alignment();
             return false;
         }
 
@@ -1458,6 +1478,7 @@ static bool align_sensor(float &electrical_zero_offset_rad)
                 phase_b_a,
                 phase_c_a);
             disable_power_stage();
+            stop_pwm_carrier_for_alignment();
             return false;
         }
 
@@ -1468,6 +1489,7 @@ static bool align_sensor(float &electrical_zero_offset_rad)
     if(!read_encoder_angle(aligned_mechanical_angle_rad))
     {
         disable_power_stage();
+        stop_pwm_carrier_for_alignment();
         ESP_LOGE(TAG, "传感器对齐后无法读取机械角度");
         return false;
     }
@@ -1477,6 +1499,11 @@ static bool align_sensor(float &electrical_zero_offset_rad)
         static_cast<float>(MOTOR_POLE_PAIRS) *
         aligned_mechanical_angle_rad);
     disable_power_stage();
+    if(!stop_pwm_carrier_for_alignment())
+    {
+        ESP_LOGE(TAG, "停止传感器对齐 PWM 载波失败");
+        return false;
+    }
     vTaskDelay(pdMS_TO_TICKS(20));
     reset_encoder_tracking();
     ESP_LOGI(TAG, "传感器对齐完成: mechanical=%.5f, zero=%.5f",
@@ -1535,6 +1562,16 @@ static bool read_rotor_sample(int64_t timestamp_us,
             encoder_previous_timestamp_us;
         if(delta_time_us <= 0)
         {
+            return false;
+        }
+
+        float sample_speed_rad_s = delta_angle_rad /
+            (static_cast<float>(delta_time_us) * 1.0e-6f);
+        if(absolute_value(sample_speed_rad_s) >
+            ENCODER_MAX_SAMPLE_SPEED_RAD_S)
+        {
+            encoder_rejected_sample_count.fetch_add(1,
+                std::memory_order_relaxed);
             return false;
         }
 
@@ -1936,6 +1973,67 @@ static bool initialize_control_timer()
 }
 
 /**
+ * @brief 启动仅用于传感器对齐的 MCPWM 载波
+ *
+ * @return 启动成功时返回 true
+ *
+ * @note 此时 control_timer_running 保持为 false，MCPWM 回调只会快速返回，
+ *       不会访问尚未初始化完成的 FOC 核心。
+ */
+static bool start_pwm_carrier_for_alignment()
+{
+    if(!control_timer)
+    {
+        return false;
+    }
+    if(control_timer_started)
+    {
+        return true;
+    }
+
+    control_timer_running = false;
+    esp_err_t error = mcpwm_timer_start_stop(control_timer,
+        MCPWM_TIMER_START_NO_STOP);
+    if(error != ESP_OK)
+    {
+        ESP_LOGE(TAG, "启动传感器对齐 PWM 载波失败: %d",
+            static_cast<int>(error));
+        return false;
+    }
+    control_timer_started = true;
+    return true;
+}
+
+/**
+ * @brief 停止传感器对齐期间使用的 MCPWM 载波
+ *
+ * @return 停止成功时返回 true
+ */
+static bool stop_pwm_carrier_for_alignment()
+{
+    control_timer_running = false;
+    bool stop_successful = true;
+    if(control_timer && control_timer_started)
+    {
+        esp_err_t error = mcpwm_timer_start_stop(control_timer,
+            MCPWM_TIMER_STOP_EMPTY);
+        if(error != ESP_OK)
+        {
+            ESP_LOGE(TAG, "停止传感器对齐 PWM 载波失败: %d",
+                static_cast<int>(error));
+            stop_successful = false;
+        }
+        control_timer_started = false;
+    }
+
+    while(control_isr_in_progress)
+    {
+        taskYIELD();
+    }
+    return stop_successful;
+}
+
+/**
  * @brief 启动 20 kHz FOC 控制定时器
  *
  * @return 启动成功时返回 true
@@ -2033,6 +2131,7 @@ static void foc_control_task_entry(void *argument)
     bool start_error_reported = false;
     bool speed_filter_valid = false;
     float filtered_speed_feedback_rad_s = 0.0f;
+    uint32_t speed_over_limit_count = 0;
     float commanded_speed_target_rad_s = 0.0f;
     float speed_integral_a = 0.0f;
     float closed_loop_start_angle_rad = 0.0f;
@@ -2090,6 +2189,7 @@ static void foc_control_task_entry(void *argument)
                     (speed_feedback_rad_s -
                         filtered_speed_feedback_rad_s);
             }
+            speed_feedback_for_log_rad_s = filtered_speed_feedback_rad_s;
             rotor_read_success_count++;
         }
         else
@@ -2225,6 +2325,20 @@ static void foc_control_task_entry(void *argument)
                     closed_loop_max_speed_rad_s = absolute_speed_rad_s;
                 }
             }
+            if(speed_filter_valid &&
+                absolute_value(filtered_speed_feedback_rad_s) >
+                    MOTOR_MAX_MECHANICAL_SPEED_RAD_S)
+            {
+                if(speed_over_limit_count <
+                    SPEED_OVERSPEED_CONFIRMATION_COUNT)
+                {
+                    speed_over_limit_count++;
+                }
+            }
+            else
+            {
+                speed_over_limit_count = 0;
+            }
             if(control_isr_fault)
             {
                 uint8_t fault_result = control_isr_fault_result;
@@ -2342,9 +2456,8 @@ static void foc_control_task_entry(void *argument)
                 test_finished = true;
                 ESP_LOGE(TAG, "发布转子样本失败，已停机");
             }
-            else if(speed_filter_valid &&
-                absolute_value(filtered_speed_feedback_rad_s) >
-                    MOTOR_MAX_MECHANICAL_SPEED_RAD_S)
+            else if(speed_over_limit_count >=
+                SPEED_OVERSPEED_CONFIRMATION_COUNT)
             {
                 stop_control_timer();
                 motor.disable();
@@ -2511,6 +2624,9 @@ static void foc_control_task_entry(void *argument)
 static void foc_status_logger_task_entry(void *argument)
 {
     (void)argument;
+    bool logger_reference_valid = false;
+    float logger_reference_angle_rad = 0.0f;
+    uint32_t logger_reference_timestamp_us = 0;
     while(true)
     {
         if(control_timer_running && control_topics && !control_isr_fault)
@@ -2521,14 +2637,48 @@ static void foc_status_logger_task_entry(void *argument)
             bool rotor_valid = control_topics->rotor.peek(rotor, 0);
             if(snapshot_valid && rotor_valid)
             {
+                uint32_t now_us = static_cast<uint32_t>(
+                    esp_timer_get_time());
+                float window_speed_rad_s =
+                    rotor.mechanical_velocity_rad_s;
+                if(logger_reference_valid)
+                {
+                    uint32_t window_time_us = rotor.timestamp_us -
+                        logger_reference_timestamp_us;
+                    if(window_time_us > 0 &&
+                        window_time_us < SPEED_LOG_WINDOW_MAX_US)
+                    {
+                        window_speed_rad_s =
+                            (rotor.mechanical_angle_rad -
+                                logger_reference_angle_rad) /
+                            (static_cast<float>(window_time_us) * 1.0e-6f);
+                    }
+                }
+                logger_reference_angle_rad = rotor.mechanical_angle_rad;
+                logger_reference_timestamp_us = rotor.timestamp_us;
+                logger_reference_valid = true;
+                float window_speed_rpm = window_speed_rad_s *
+                    RAD_PER_SECOND_TO_RPM;
+                uint32_t rotor_age_us = now_us - rotor.timestamp_us;
                 ESP_LOGI(TAG,
-                    "运行状态: Iq=%.3f/%.3f A, speed=%.3f rad/s, "
-                    "angle=%.3f rad, electrical=%.3f rad, isr=%lu/%lu",
+                    "运行状态: Iq=%.3f/%.3f A, speed_raw=%.3f rad/s, "
+                    "speed_window=%.3f rad/s(%.1f rpm), "
+                    "speed_feedback=%.3f rad/s, angle=%.3f rad, "
+                    "electrical=%.3f rad, rotor_seq=%lu age=%lu us, "
+                    "enc_reject=%lu, isr=%lu/%lu",
                     snapshot.i_q_a,
                     snapshot.target_i_q_a,
                     rotor.mechanical_velocity_rad_s,
+                    window_speed_rad_s,
+                    window_speed_rpm,
+                    speed_feedback_for_log_rad_s,
                     rotor.mechanical_angle_rad,
                     snapshot.electrical_angle_rad,
+                    static_cast<unsigned long>(rotor.sequence),
+                    static_cast<unsigned long>(rotor_age_us),
+                    static_cast<unsigned long>(
+                        encoder_rejected_sample_count.load(
+                            std::memory_order_relaxed)),
                     static_cast<unsigned long>(control_isr_last_cycles),
                     static_cast<unsigned long>(control_isr_max_cycles));
             }
@@ -2577,6 +2727,13 @@ void esp32_hardware_test::init()
     {
         ESP_LOGW(TAG, "AS5600 I2C 总线初始复位失败: %d",
             static_cast<int>(encoder_result));
+    }
+
+    if(!initialize_control_timer())
+    {
+        disable_power_stage();
+        ESP_LOGE(TAG, "20 kHz FOC 控制定时器初始化失败，保持驱动器关闭");
+        return;
     }
 
     if(!calibrate_current_offsets())
@@ -2662,13 +2819,6 @@ void esp32_hardware_test::init()
     {
         motor.disable();
         ESP_LOGE(TAG, "设置初始电流目标失败: %d", static_cast<int>(result));
-        return;
-    }
-
-    if(!initialize_control_timer())
-    {
-        motor.disable();
-        ESP_LOGE(TAG, "20 kHz FOC 控制定时器初始化失败，保持驱动器关闭");
         return;
     }
 
