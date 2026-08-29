@@ -619,8 +619,11 @@ bool IRAM_ATTR foc_core::valid_rotor_sample(
     const rotor_sample &sample,
     uint32_t timestamp_us) const
 {
-    uint32_t sample_age_us = timestamp_us - sample.timestamp_us;
-    return sample.valid && sample_age_us <= SENSOR_TIMEOUT_US &&
+    int32_t sample_age_us = static_cast<int32_t>(
+        timestamp_us - sample.timestamp_us);
+    return sample.valid &&
+        sample_age_us <= static_cast<int32_t>(SENSOR_TIMEOUT_US) &&
+        sample_age_us >= -SENSOR_FUTURE_TOLERANCE_US &&
         is_finite_number(sample.mechanical_angle_rad) &&
         is_finite_number(sample.mechanical_velocity_rad_s);
 }
@@ -637,8 +640,11 @@ bool IRAM_ATTR foc_core::valid_current_sample(
     const phase_current_sample &sample,
     uint32_t timestamp_us) const
 {
-    uint32_t sample_age_us = timestamp_us - sample.timestamp_us;
-    return sample.valid && sample_age_us <= SENSOR_TIMEOUT_US &&
+    int32_t sample_age_us = static_cast<int32_t>(
+        timestamp_us - sample.timestamp_us);
+    return sample.valid &&
+        sample_age_us <= static_cast<int32_t>(SENSOR_TIMEOUT_US) &&
+        sample_age_us >= -SENSOR_FUTURE_TOLERANCE_US &&
         is_finite_number(sample.phase_a_a) &&
         is_finite_number(sample.phase_b_a) &&
         is_finite_number(sample.phase_c_a);
@@ -1081,7 +1087,12 @@ foc_result IRAM_ATTR foc_core::run_control_loop(
     }
 
     foc_target target{};
-    if(!load_target<FROM_ISR>(target) || !valid_target(target))
+    if(!load_target<FROM_ISR>(target))
+    {
+        // latest_topic 的无锁快照可能正好处于发布窗口，沿用上一份目标。
+        target = active_target;
+    }
+    if(!valid_target(target))
     {
         return fail_control_cycle<FROM_ISR>(foc_fault::INTERNAL,
             foc_result::INTERNAL_ERROR,
@@ -1091,8 +1102,12 @@ foc_result IRAM_ATTR foc_core::run_control_loop(
     active_target = target;
 
     rotor_sample rotor{};
-    if(!load_rotor<FROM_ISR>(rotor) ||
-        !valid_rotor_sample(rotor, timestamp_us))
+    if(!load_rotor<FROM_ISR>(rotor))
+    {
+        // 单次快照竞争不应覆盖有效的上一周期传感器数据。
+        rotor = runtime.rotor;
+    }
+    if(!valid_rotor_sample(rotor, timestamp_us))
     {
         return fail_control_cycle<FROM_ISR>(foc_fault::ROTOR_SENSOR,
             foc_result::SENSOR_ERROR,
@@ -1109,8 +1124,12 @@ foc_result IRAM_ATTR foc_core::run_control_loop(
     }
 
     phase_current_sample current{};
-    if(!load_current<FROM_ISR>(current) ||
-        !valid_current_sample(current, timestamp_us))
+    if(!load_current<FROM_ISR>(current))
+    {
+        // 单次快照竞争不应覆盖有效的上一周期电流数据。
+        current = runtime.current;
+    }
+    if(!valid_current_sample(current, timestamp_us))
     {
         return fail_control_cycle<FROM_ISR>(foc_fault::CURRENT_SENSOR,
             foc_result::SENSOR_ERROR,

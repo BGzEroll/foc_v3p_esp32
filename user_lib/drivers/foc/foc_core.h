@@ -124,6 +124,7 @@ class foc_core
 
     private:
         static constexpr uint32_t SENSOR_TIMEOUT_US = 5000;
+        static constexpr int32_t SENSOR_FUTURE_TOLERANCE_US = 2000;
         static constexpr uint32_t SNAPSHOT_PERIOD_US = 1000;
         static constexpr float MAX_SVPWM_VOLTAGE_RATIO = 0.57735026918962576451f;
 

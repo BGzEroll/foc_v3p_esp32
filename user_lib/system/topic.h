@@ -10,12 +10,13 @@
 namespace topic
 {
     /**
-     * @brief 保存最新完整快照的单槽话题
+     * @brief 保存最新完整快照的无锁话题
      *
      * @tparam item_type 需要按值传播的数据类型
      *
-     * @note 生产者使用 publish() 覆盖旧快照，消费者使用 peek()
-     *       读取但不移除快照。对象必须在所有使用者停止后才能销毁。
+     * @note 该话题适合一个生产者和多个消费者。生产者使用 publish()
+     *       覆盖旧快照，消费者使用 peek() 读取但不移除快照。数据通过
+     *       版本号提交，任务和 ISR 之间不使用 Queue 自旋锁。
      */
     template<typename item_type>
     class latest_topic
@@ -32,7 +33,7 @@ namespace topic
 
         public:
             /**
-             * @brief 使用对象内部静态存储初始化单槽 Queue
+             * @brief 初始化对象内部快照存储
              *
              * @return 初始化成功时返回 true
              *
@@ -40,13 +41,8 @@ namespace topic
              */
             bool init()
             {
-                if(queue_handle){return true;}
-
-                queue_handle = xQueueCreateStatic(1,
-                    sizeof(item_type),
-                    queue_storage,
-                    &queue_control);
-                return queue_handle != nullptr;
+                initialized_flag = true;
+                return true;
             }
 
         public:
@@ -59,8 +55,8 @@ namespace topic
              */
             bool publish(const item_type &item)
             {
-                if(!queue_handle){return false;}
-                return xQueueOverwrite(queue_handle, &item) == pdPASS;
+                if(!initialized_flag){return false;}
+                return write_snapshot(item);
             }
 
             /**
@@ -76,10 +72,18 @@ namespace topic
              */
             bool peek(item_type &item, TickType_t wait_ticks = 0) const
             {
-                if(!queue_handle){return false;}
-                return xQueuePeek(queue_handle,
-                    &item,
-                    wait_ticks) == pdPASS;
+                if(!initialized_flag){return false;}
+                if(read_snapshot(item)){return true;}
+                if(wait_ticks == 0){return false;}
+
+                TickType_t start_tick = xTaskGetTickCount();
+                while(static_cast<TickType_t>(
+                    xTaskGetTickCount() - start_tick) < wait_ticks)
+                {
+                    vTaskDelay(1);
+                    if(read_snapshot(item)){return true;}
+                }
+                return read_snapshot(item);
             }
 
             /**
@@ -96,10 +100,9 @@ namespace topic
             bool IRAM_ATTR publish_from_isr(const item_type &item,
                 BaseType_t &higher_priority_task_woken)
             {
-                if(!queue_handle){return false;}
-                return xQueueOverwriteFromISR(queue_handle,
-                    &item,
-                    &higher_priority_task_woken) == pdPASS;
+                (void)higher_priority_task_woken;
+                if(!initialized_flag){return false;}
+                return write_snapshot_from_isr(item);
             }
 
             /**
@@ -111,8 +114,8 @@ namespace topic
              */
             bool IRAM_ATTR peek_from_isr(item_type &item) const
             {
-                if(!queue_handle){return false;}
-                return xQueuePeekFromISR(queue_handle, &item) == pdPASS;
+                if(!initialized_flag){return false;}
+                return read_snapshot(item);
             }
 
             /**
@@ -122,13 +125,76 @@ namespace topic
              */
             bool initialized() const
             {
-                return queue_handle != nullptr;
+                return initialized_flag;
             }
 
         private:
-            StaticQueue_t queue_control{};
-            alignas(item_type) uint8_t queue_storage[sizeof(item_type)]{};
-            QueueHandle_t queue_handle = nullptr;
+            static void IRAM_ATTR copy_to_storage(
+                volatile uint8_t *storage,
+                const item_type &item)
+            {
+                const uint8_t *source = reinterpret_cast<const uint8_t *>(
+                    &item);
+                for(uint32_t index = 0; index < sizeof(item_type); index++)
+                {
+                    storage[index] = source[index];
+                }
+            }
+
+            static void IRAM_ATTR copy_from_storage(
+                item_type &item,
+                const volatile uint8_t *storage)
+            {
+                uint8_t *destination = reinterpret_cast<uint8_t *>(&item);
+                for(uint32_t index = 0; index < sizeof(item_type); index++)
+                {
+                    destination[index] = storage[index];
+                }
+            }
+
+            bool IRAM_ATTR write_snapshot(const item_type &item)
+            {
+                uint32_t current_version = __atomic_load_n(&version,
+                    __ATOMIC_RELAXED);
+                if((current_version & 1U) != 0U){return false;}
+
+                __atomic_store_n(&version,
+                    current_version + 1U,
+                    __ATOMIC_RELEASE);
+                copy_to_storage(storage, item);
+                __atomic_store_n(&version,
+                    current_version + 2U,
+                    __ATOMIC_RELEASE);
+                return true;
+            }
+
+            bool IRAM_ATTR write_snapshot_from_isr(const item_type &item)
+            {
+                return write_snapshot(item);
+            }
+
+            bool IRAM_ATTR read_snapshot(item_type &item) const
+            {
+                for(uint32_t attempt = 0; attempt < 2; attempt++)
+                {
+                    uint32_t version_before = __atomic_load_n(&version,
+                        __ATOMIC_ACQUIRE);
+                    if((version_before & 1U) != 0U){continue;}
+
+                    copy_from_storage(item, storage);
+                    uint32_t version_after = __atomic_load_n(&version,
+                        __ATOMIC_ACQUIRE);
+                    if(version_before == version_after)
+                    {
+                        return version_before != 0U;
+                    }
+                }
+                return false;
+            }
+
+            alignas(item_type) volatile uint8_t storage[sizeof(item_type)]{};
+            volatile uint32_t version = 0;
+            bool initialized_flag = false;
     };
 
     /**
