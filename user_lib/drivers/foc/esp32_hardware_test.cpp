@@ -46,7 +46,7 @@ static constexpr uint32_t ENCODER_READ_RETRY_COUNT = 2;
 static constexpr uint32_t ENCODER_RETRY_DELAY_MS = 1;
 
 static constexpr int PWM_GROUP_ID = 0;
-static constexpr uint32_t PWM_FREQUENCY_HZ = 20000;
+static constexpr uint32_t PWM_FREQUENCY_HZ = 10000;
 static constexpr uint32_t PWM_RESOLUTION_HZ = 10000000;
 static constexpr uint32_t PWM_PERIOD_TICKS =
     PWM_RESOLUTION_HZ / PWM_FREQUENCY_HZ;
@@ -84,7 +84,8 @@ static constexpr uint32_t FOC_CONTROL_FREQUENCY_HZ = PWM_FREQUENCY_HZ;
 static constexpr uint32_t FOC_CONTROL_PERIOD_US =
     1000000 / FOC_CONTROL_FREQUENCY_HZ;
 static constexpr uint32_t CONTROL_TIMER_RESOLUTION_HZ = PWM_RESOLUTION_HZ;
-static constexpr float FOC_CONTROL_PERIOD_S = 0.00005f;
+static constexpr float FOC_CONTROL_PERIOD_S =
+    static_cast<float>(FOC_CONTROL_PERIOD_US) * 1.0e-6f;
 static constexpr float SPEED_CONTROL_PERIOD_S = 0.001f;
 static constexpr float CURRENT_PI_KP = 0.54f;
 static constexpr float CURRENT_PI_KI = 400.0f;
@@ -101,8 +102,8 @@ static constexpr float MOTOR_MAX_MECHANICAL_SPEED_RAD_S = 30.0f;
 static constexpr float ENCODER_MAX_SAMPLE_SPEED_RAD_S = 120.0f;
 static constexpr uint32_t SPEED_OVERSPEED_CONFIRMATION_COUNT = 3;
 static constexpr uint32_t SPEED_LOG_WINDOW_MAX_US = 2000000;
-// 当前已验证 0.5 系数能够可靠起转，后续再单独优化速度反馈平滑度。
-static constexpr float SPEED_FILTER_ALPHA = 0.5f;
+// 降低速度反馈权重，减少 AS5600 速度量化和采样抖动传入速度环。
+static constexpr float SPEED_FILTER_ALPHA = 0.05f;
 static constexpr uint32_t VELOCITY_ESTIMATION_PERIOD_US = 20000;
 static constexpr float STARTUP_KICK_Q_CURRENT_A = 0.05f;
 static constexpr uint32_t STARTUP_KICK_DURATION_MS = 100;
@@ -556,7 +557,7 @@ static uint32_t IRAM_ATTR duty_to_counts(float duty)
  * @return 写入结果
  *
  * @note MCPWM 比较值接口同时支持任务和 ISR 上下文；该函数保持在
- *       IRAM 中，供 20 kHz 控制 ISR 调用。
+ *       IRAM 中，供 FOC 控制 ISR 调用。
  */
 static foc_result IRAM_ATTR write_pwm_compare(
     mcpwm_cmpr_handle_t comparator,
@@ -1800,7 +1801,7 @@ static bool IRAM_ATTR publish_current_sample_from_isr(
 }
 
 /**
- * @brief 20 kHz MCPWM 定时器 ISR 回调
+ * @brief MCPWM 定时器 ISR 回调
  *
  * @param timer MCPWM 定时器句柄
  * @param event_data MCPWM 定时器事件数据
@@ -1896,7 +1897,7 @@ static bool IRAM_ATTR control_timer_alarm_callback(
 }
 
 /**
- * @brief 初始化 20 kHz MCPWM FOC 控制定时器
+ * @brief 初始化 MCPWM FOC 控制定时器
  *
  * @return 初始化成功时返回 true
  */
@@ -1945,7 +1946,7 @@ static void initialize_control_timer_on_core(void *argument)
 }
 
 /**
- * @brief 初始化 20 kHz MCPWM FOC 控制定时器
+ * @brief 初始化 MCPWM FOC 控制定时器
  *
  * @return 初始化成功时返回 true
  */
@@ -2034,7 +2035,7 @@ static bool stop_pwm_carrier_for_alignment()
 }
 
 /**
- * @brief 启动 20 kHz FOC 控制定时器
+ * @brief 启动 FOC 控制定时器
  *
  * @return 启动成功时返回 true
  */
@@ -2083,7 +2084,7 @@ static bool start_control_timer()
 }
 
 /**
- * @brief 停止 20 kHz MCPWM FOC 控制定时器并等待当前 ISR 退出
+ * @brief 停止 MCPWM FOC 控制定时器并等待当前 ISR 退出
  *
  * @return 停止成功时返回 true
  */
@@ -2117,9 +2118,9 @@ static bool stop_control_timer()
  * @param argument FreeRTOS 任务参数
  *
  * @note 任务每 1 ms 读取 AS5600 并向 Topic 发布转子样本，运行低速机械速度
- *       环得到 q 轴电流目标。ADC1 连续采样任务提供电流原始值，20 kHz
- *       MCPWM ISR 发布电流样本并运行 foc_core::core_loop_from_isr()；
- *       MCPWM ISR 在 CPU1，当前任务在 CPU0。
+ *       环得到 q 轴电流目标。ADC1 连续采样任务提供电流原始值，MCPWM
+ *       ISR 发布电流样本并运行 foc_core::core_loop_from_isr()；MCPWM ISR
+ *       在 CPU1，当前任务在 CPU0。
  */
 static void foc_control_task_entry(void *argument)
 {
@@ -2131,6 +2132,7 @@ static void foc_control_task_entry(void *argument)
     bool start_error_reported = false;
     bool speed_filter_valid = false;
     float filtered_speed_feedback_rad_s = 0.0f;
+    uint32_t last_speed_filter_timestamp_us = 0;
     uint32_t speed_over_limit_count = 0;
     float commanded_speed_target_rad_s = 0.0f;
     float speed_integral_a = 0.0f;
@@ -2180,14 +2182,18 @@ static void foc_control_task_entry(void *argument)
             if(!speed_filter_valid)
             {
                 filtered_speed_feedback_rad_s = speed_feedback_rad_s;
+                last_speed_filter_timestamp_us = rotor.timestamp_us;
                 speed_filter_valid = true;
             }
-            else
+            else if(static_cast<uint32_t>(rotor.timestamp_us -
+                last_speed_filter_timestamp_us) >=
+                VELOCITY_ESTIMATION_PERIOD_US)
             {
                 filtered_speed_feedback_rad_s +=
                     SPEED_FILTER_ALPHA *
                     (speed_feedback_rad_s -
                         filtered_speed_feedback_rad_s);
+                last_speed_filter_timestamp_us = rotor.timestamp_us;
             }
             speed_feedback_for_log_rad_s = filtered_speed_feedback_rad_s;
             rotor_read_success_count++;
@@ -2350,7 +2356,7 @@ static void foc_control_task_entry(void *argument)
                 motor_started = false;
                 test_finished = true;
                 ESP_LOGE(TAG,
-                    "20 kHz FOC ISR 失败，已停机: result=%d, ticks=%lu, "
+                    "FOC ISR 失败，已停机: result=%d, ticks=%lu, "
                     "rotor_ok=%lu, rotor_fail=%lu, rotor_age=%lu us, "
                     "rotor_pub=%lu interval=%lu max_interval=%lu us, "
                     "current_age=%lu us, adc_seq=%lu/%lu/%lu, adc_frames=%lu, "
@@ -2695,8 +2701,8 @@ static void foc_status_logger_task_entry(void *argument)
  * @note 该测试会先保持 EN 低电平，校准电流零点，使用 0.4 V 固定电压矢量
  *       对齐 AS5600，然后延时 1 s 自动进入低速 AS5600 速度闭环。目标机械
  *       速度为 5 rad/s，正常 q 轴电流限制为 0.05 A，启动阶段使用 0.05 A
- *       助推 100 ms，运行 60 s 后自动停机。电流环由 20 kHz MCPWM ISR
- *       驱动，AS5600 仍由任务读取。没有硬件故障输入，保护依靠电流采样、
+ *       助推 100 ms，运行 60 s 后自动停机。电流环由 MCPWM ISR 驱动，
+ *       AS5600 仍由任务读取。没有硬件故障输入，保护依靠电流采样、
  *       机械速度检查和 foc_core 软件限幅。
  */
 void esp32_hardware_test::init()
@@ -2732,7 +2738,7 @@ void esp32_hardware_test::init()
     if(!initialize_control_timer())
     {
         disable_power_stage();
-        ESP_LOGE(TAG, "20 kHz FOC 控制定时器初始化失败，保持驱动器关闭");
+        ESP_LOGE(TAG, "FOC 控制定时器初始化失败，保持驱动器关闭");
         return;
     }
 
