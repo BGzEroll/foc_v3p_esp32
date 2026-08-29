@@ -18,9 +18,9 @@ static constexpr float ONE_OVER_TWO_PI =
 static constexpr float TWO_OVER_THREE = 0.66666666666666666667f;
 static constexpr float SQRT_THREE_OVER_TWO = 0.86602540378443864676f;
 static constexpr float MAX_TURN_COUNT = 2147483000.0f;
-static constexpr uint32_t FLOAT_EXPONENT_MASK = 0x7f800000U;
-static constexpr uint32_t FLOAT_MANTISSA_MASK = 0x007fffffU;
-static constexpr uint32_t FLOAT_SIGN_MASK = 0x80000000U;
+static constexpr uint32_t FLOAT_EXPONENT_MASK = 0x7f800000;
+static constexpr uint32_t FLOAT_MANTISSA_MASK = 0x007fffff;
+static constexpr uint32_t FLOAT_SIGN_MASK = 0x80000000;
 
 struct alpha_beta_current
 {
@@ -55,7 +55,7 @@ struct alpha_beta_voltage
  */
 static uint32_t FOC_IRAM_ATTR float_to_bits(float value)
 {
-    uint32_t bits = 0U;
+    uint32_t bits = 0;
     __builtin_memcpy(&bits, &value, sizeof(bits));
     return bits;
 }
@@ -278,10 +278,10 @@ static bool FOC_IRAM_ATTR calculate_inverse_sqrt(float value,
     }
 
     uint32_t estimate_bits = float_to_bits(value);
-    estimate_bits = 0x5f3759dfU - (estimate_bits >> 1U);
+    estimate_bits = 0x5f3759df - (estimate_bits >> 1);
     float estimate = bits_to_float(estimate_bits);
     float half_value = 0.5f * value;
-    for(uint32_t iteration = 0U; iteration < 3U; iteration++)
+    for(uint32_t iteration = 0; iteration < 3; iteration++)
     {
         estimate = estimate * (1.5f - half_value * estimate * estimate);
     }
@@ -307,9 +307,9 @@ static bool FOC_IRAM_ATTR calculate_reciprocal(float value,
         return false;
     }
 
-    uint32_t estimate_bits = 0x7f000000U - float_to_bits(value);
+    uint32_t estimate_bits = 0x7f000000 - float_to_bits(value);
     float estimate = bits_to_float(estimate_bits);
-    for(uint32_t iteration = 0U; iteration < 3U; iteration++)
+    for(uint32_t iteration = 0; iteration < 3; iteration++)
     {
         estimate = estimate * (2.0f - value * estimate);
     }
@@ -567,7 +567,7 @@ bool foc_core::valid_config(const foc_config &config) const
     float maximum_svpwm_voltage_v = config.bus_voltage_v *
         MAX_SVPWM_VOLTAGE_RATIO;
 
-    return config.pole_pairs > 0U &&
+    return config.pole_pairs > 0 &&
         (config.rotor_direction == 1 || config.rotor_direction == -1) &&
         is_finite_number(config.electrical_zero_offset_rad) &&
         is_finite_number(config.control_period_s) &&
@@ -886,7 +886,7 @@ bool FOC_IRAM_ATTR foc_core::load_target(foc_target &target)
     }
     else
     {
-        return target_topic_.peek(target, 0U);
+        return target_topic_.peek(target, 0);
     }
 }
 
@@ -906,7 +906,7 @@ bool FOC_IRAM_ATTR foc_core::load_rotor(rotor_sample &sample)
     }
     else
     {
-        return rotor_topic_.peek(sample, 0U);
+        return rotor_topic_.peek(sample, 0);
     }
 }
 
@@ -927,7 +927,7 @@ bool FOC_IRAM_ATTR foc_core::load_current(
     }
     else
     {
-        return current_topic_.peek(sample, 0U);
+        return current_topic_.peek(sample, 0);
     }
 }
 
@@ -987,7 +987,7 @@ void FOC_IRAM_ATTR foc_core::publish_snapshot(uint32_t timestamp_us,
     }
 
     foc_snapshot snapshot{};
-    snapshot.sequence = snapshot_sequence_ + 1U;
+    snapshot.sequence = snapshot_sequence_ + 1;
     snapshot.timestamp_us = timestamp_us;
     snapshot.state = state_;
     snapshot.fault_flags = fault_flags_;
@@ -1218,12 +1218,12 @@ foc_result foc_core::init(const foc_config &config,
     output_ = output;
     runtime_ = {};
     active_target_ = {};
-    fault_flags_ = 0U;
+    fault_flags_ = 0;
     output_active_ = false;
     initialized_ = false;
-    target_sequence_ = 0U;
-    snapshot_sequence_ = 0U;
-    last_snapshot_timestamp_us_ = 0U;
+    target_sequence_ = 0;
+    snapshot_sequence_ = 0;
+    last_snapshot_timestamp_us_ = 0;
     snapshot_has_timestamp_ = false;
 
     bool topics_ready = target_topic_.init() && rotor_topic_.init() &&
@@ -1249,7 +1249,7 @@ foc_result foc_core::init(const foc_config &config,
         fault_flags_ = foc_fault_mask(foc_fault::DRIVER);
         state_ = foc_state::FAULT;
         output_.disable(output_.context);
-        publish_snapshot<false>(0U, nullptr, true);
+        publish_snapshot<false>(0, nullptr, true);
         initialized_ = false;
         state_ = foc_state::UNINITIALIZED;
         return foc_result::DRIVER_FAULT;
@@ -1257,7 +1257,7 @@ foc_result foc_core::init(const foc_config &config,
 
     output_.disable(output_.context);
     state_ = foc_state::READY;
-    publish_snapshot<false>(0U, nullptr, true);
+    publish_snapshot<false>(0, nullptr, true);
     return foc_result::OK;
 }
 
@@ -1277,7 +1277,7 @@ foc_result foc_core::enable()
     if(state_ != foc_state::READY){return foc_result::INVALID_STATE;}
 
     foc_target target{};
-    if(!target_topic_.peek(target, 0U)){return foc_result::NOT_READY;}
+    if(!target_topic_.peek(target, 0)){return foc_result::NOT_READY;}
     if(target.mode != foc_control_mode::CURRENT)
     {
         return foc_result::DISABLED;
@@ -1443,7 +1443,7 @@ foc_result foc_core::clear_fault()
     output_.disable(output_.context);
     publish_disabled_target();
     reset_control_output();
-    fault_flags_ = 0U;
+    fault_flags_ = 0;
     state_ = foc_state::READY;
     publish_snapshot<false>(latest_timestamp_us(), nullptr, true);
     return foc_result::OK;

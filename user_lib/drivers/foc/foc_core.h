@@ -123,8 +123,8 @@ class foc_core
             BaseType_t *higher_priority_task_woken);
 
     private:
-        static constexpr uint32_t SENSOR_TIMEOUT_US = 5000U;
-        static constexpr uint32_t SNAPSHOT_PERIOD_US = 1000U;
+        static constexpr uint32_t SENSOR_TIMEOUT_US = 5000;
+        static constexpr uint32_t SNAPSHOT_PERIOD_US = 1000;
         static constexpr float MAX_SVPWM_VOLTAGE_RATIO =
             0.57735026918962576451f;
 
@@ -137,12 +137,12 @@ class foc_core
         foc_target active_target_{};
         foc_runtime runtime_{};
         foc_state state_ = foc_state::UNINITIALIZED;
-        uint32_t fault_flags_ = 0U;
+        uint32_t fault_flags_ = 0;
         bool output_active_ = false;
         bool initialized_ = false;
-        uint32_t target_sequence_ = 0U;
-        uint32_t snapshot_sequence_ = 0U;
-        uint32_t last_snapshot_timestamp_us_ = 0U;
+        uint32_t target_sequence_ = 0;
+        uint32_t snapshot_sequence_ = 0;
+        uint32_t last_snapshot_timestamp_us_ = 0;
         bool snapshot_has_timestamp_ = false;
 };
 

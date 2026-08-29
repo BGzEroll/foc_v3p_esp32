@@ -2,7 +2,7 @@
 
 #include <climits>
 
-static constexpr uint8_t I2C_GLITCH_IGNORE_COUNT = 7U;
+static constexpr uint8_t I2C_GLITCH_IGNORE_COUNT = 7;
 
 /**
  * @brief 将 ESP-IDF I2C 传输结果转换为总线结果
@@ -82,7 +82,7 @@ i2c_result i2c_bus::init()
     config.clk_source = I2C_CLK_SRC_DEFAULT;
     config.glitch_ignore_cnt = I2C_GLITCH_IGNORE_COUNT;
     config.intr_priority = 0;
-    config.trans_queue_depth = 0U;
+    config.trans_queue_depth = 0;
     config.flags.enable_internal_pullup = enable_internal_pullup;
     config.flags.allow_pd = false;
 
@@ -134,7 +134,7 @@ i2c_result i2c_device::init()
 {
     if(device_handle){return i2c_result::OK;}
 
-    if(device_address > 0x7FU || scl_speed_hz == 0U)
+    if(device_address > 0x7F || scl_speed_hz == 0)
     {
         return i2c_result::INVALID_ARGUMENT;
     }
@@ -146,7 +146,7 @@ i2c_result i2c_device::init()
     config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     config.device_address = device_address;
     config.scl_speed_hz = scl_speed_hz;
-    config.scl_wait_us = 0U;
+    config.scl_wait_us = 0;
     config.flags.disable_ack_check = false;
 
     esp_err_t error = i2c_master_bus_add_device(bus.bus_handle,
@@ -178,14 +178,14 @@ i2c_result i2c_device::read_bytes(uint8_t register_address,
     uint32_t transfer_timeout_ms)
 {
     if(!device_handle){return i2c_result::NOT_INITIALIZED;}
-    if(!data || size == 0U || transfer_timeout_ms > INT_MAX)
+    if(!data || size == 0 || transfer_timeout_ms > INT_MAX)
     {
         return i2c_result::INVALID_ARGUMENT;
     }
 
     esp_err_t error = i2c_master_transmit_receive(device_handle,
         &register_address,
-        1U,
+        1,
         data,
         size,
         static_cast<int>(transfer_timeout_ms));
@@ -208,20 +208,20 @@ i2c_result i2c_device::write_bytes(uint8_t register_address,
     uint32_t transfer_timeout_ms)
 {
     if(!device_handle){return i2c_result::NOT_INITIALIZED;}
-    if(!data || size == 0U || transfer_timeout_ms > INT_MAX)
+    if(!data || size == 0 || transfer_timeout_ms > INT_MAX)
     {
         return i2c_result::INVALID_ARGUMENT;
     }
 
     i2c_master_transmit_multi_buffer_info_t buffers[2]{};
     buffers[0].write_buffer = &register_address;
-    buffers[0].buffer_size = 1U;
+    buffers[0].buffer_size = 1;
     buffers[1].write_buffer = data;
     buffers[1].buffer_size = size;
 
     esp_err_t error = i2c_master_multi_buffer_transmit(device_handle,
         buffers,
-        2U,
+        2,
         static_cast<int>(transfer_timeout_ms));
     return map_transfer_error(error);
 }

@@ -21,14 +21,14 @@ enum class uart_result : uint8_t
 class uart_bus
 {
     public:
-        static constexpr uint32_t DEFAULT_READ_TIMEOUT_MS = 0U;
-        static constexpr uint32_t DEFAULT_TRANSFER_TIMEOUT_MS = 50U;
+        static constexpr uint32_t DEFAULT_READ_TIMEOUT_MS = 0;
+        static constexpr uint32_t DEFAULT_TRANSFER_TIMEOUT_MS = 50;
 
         uart_bus(uart_port_t port,
             gpio_num_t tx_pin,
             gpio_num_t rx_pin,
             uint32_t baud_rate,
-            uint16_t rx_buffer_size = 1024U);
+            uint16_t rx_buffer_size = 1024);
         uart_bus(const uart_bus &) = delete;
         uart_bus &operator=(const uart_bus &) = delete;
 

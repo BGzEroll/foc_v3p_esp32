@@ -5,44 +5,37 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static constexpr uint32_t GREEN_LED_ON_TIME_MS = 100;
-static constexpr uint32_t GREEN_LED_OFF_TIME_MS = 900;
-static constexpr uint32_t LED_TASK_STACK_SIZE = 2048;
-static constexpr UBaseType_t LED_TASK_PRIORITY = tskIDLE_PRIORITY + 1U;
-static constexpr gpio_num_t GREEN_LED_GPIO = GPIO_NUM_2;
-static constexpr uint32_t GREEN_LED_ON_LEVEL = 0U;
-
-static leds green_led(GREEN_LED_GPIO, GREEN_LED_ON_LEVEL);
+static leds onboard_led(GPIO_NUM_22, 0);
 
 /**
- * @brief 绿色 LED 周期闪烁任务
+ * @brief 板载 LED 周期闪烁任务
  *
  * @param argument FreeRTOS 任务参数
  */
-static void green_led_task_entry(void *argument)
+static void onboard_led_task_entry(void *argument)
 {
     while(true)
     {
-        green_led.on();
-        vTaskDelay(pdMS_TO_TICKS(GREEN_LED_ON_TIME_MS));
+        onboard_led.on();
+        vTaskDelay(pdMS_TO_TICKS(50));
 
-        green_led.off();
-        vTaskDelay(pdMS_TO_TICKS(GREEN_LED_OFF_TIME_MS));
+        onboard_led.off();
+        vTaskDelay(pdMS_TO_TICKS(950));
     }
 }
 
 /**
- * @brief 创建绿色 LED 周期闪烁任务
+ * @brief 创建 LED 周期闪烁任务
  */
 void led_dev::init()
 {
-    ESP_ERROR_CHECK(green_led.init());
+    ESP_ERROR_CHECK(onboard_led.init());
 
-    BaseType_t result = xTaskCreate(green_led_task_entry,
-        "green_led",
-        LED_TASK_STACK_SIZE,
+    BaseType_t result = xTaskCreate(onboard_led_task_entry,
+        "onboard_led",
+        2048,
         nullptr,
-        LED_TASK_PRIORITY,
+        tskIDLE_PRIORITY + 1,
         nullptr);
 
     if(result != pdPASS)

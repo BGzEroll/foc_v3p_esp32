@@ -15,7 +15,7 @@
 static TickType_t milliseconds_to_ticks(uint32_t timeout_ms)
 {
     TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
-    if(timeout_ms > 0U && ticks == 0U){ticks = 1U;}
+    if(timeout_ms > 0 && ticks == 0){ticks = 1;}
     return ticks;
 }
 
@@ -71,7 +71,7 @@ uart_result uart_bus::init()
     if(!GPIO_IS_VALID_OUTPUT_GPIO(tx_pin) ||
         !GPIO_IS_VALID_GPIO(rx_pin) ||
         tx_pin == rx_pin ||
-        baud_rate == 0U ||
+        baud_rate == 0 ||
         baud_rate > UART_BITRATE_MAX ||
         baud_rate > INT_MAX ||
         rx_buffer_size <= UART_HW_FIFO_LEN(port))
@@ -101,7 +101,7 @@ uart_result uart_bus::init()
     config.parity = UART_PARITY_DISABLE;
     config.stop_bits = UART_STOP_BITS_1;
     config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
-    config.rx_flow_ctrl_thresh = 0U;
+    config.rx_flow_ctrl_thresh = 0;
     config.source_clk = UART_SCLK_DEFAULT;
     config.flags.allow_pd = false;
 
@@ -142,27 +142,27 @@ uart_result uart_bus::read_bytes(uint8_t *data,
     uint16_t &received_size,
     uint32_t read_timeout_ms)
 {
-    received_size = 0U;
+    received_size = 0;
 
     if(!initialized){return uart_result::NOT_INITIALIZED;}
-    if(!data || max_size == 0U){return uart_result::INVALID_ARGUMENT;}
+    if(!data || max_size == 0){return uart_result::INVALID_ARGUMENT;}
     if(!task_context_ready()){return uart_result::INVALID_CONTEXT;}
 
     int first_read_size = uart_read_bytes(port,
         data,
-        1U,
+        1,
         milliseconds_to_ticks(read_timeout_ms));
     if(first_read_size < 0){return uart_result::BUS_ERROR;}
     if(first_read_size == 0)
     {
-        return read_timeout_ms > 0U ? uart_result::READ_TIMEOUT :
+        return read_timeout_ms > 0 ? uart_result::READ_TIMEOUT :
             uart_result::OK;
     }
 
-    received_size = 1U;
-    if(max_size == 1U){return uart_result::OK;}
+    received_size = 1;
+    if(max_size == 1){return uart_result::OK;}
 
-    size_t buffered_size = 0U;
+    size_t buffered_size = 0;
     if(uart_get_buffered_data_len(port, &buffered_size) != ESP_OK)
     {
         return uart_result::BUS_ERROR;
@@ -171,12 +171,12 @@ uart_result uart_bus::read_bytes(uint8_t *data,
     size_t remaining_capacity = (size_t)max_size - received_size;
     uint32_t drain_size = static_cast<uint32_t>(
         std::min(buffered_size, remaining_capacity));
-    if(drain_size == 0U){return uart_result::OK;}
+    if(drain_size == 0){return uart_result::OK;}
 
     int drained_size = uart_read_bytes(port,
         &data[received_size],
         drain_size,
-        0U);
+        0);
     if(drained_size < 0){return uart_result::BUS_ERROR;}
 
     received_size += static_cast<uint16_t>(drained_size);
@@ -197,7 +197,7 @@ uart_result uart_bus::write_bytes(const uint8_t *data,
     uint32_t transfer_timeout_ms)
 {
     if(!initialized){return uart_result::NOT_INITIALIZED;}
-    if(!data || size == 0U){return uart_result::INVALID_ARGUMENT;}
+    if(!data || size == 0){return uart_result::INVALID_ARGUMENT;}
     if(!task_context_ready()){return uart_result::INVALID_CONTEXT;}
 
     int written_size = uart_write_bytes(port, data, size);

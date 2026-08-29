@@ -195,7 +195,7 @@ static foc_output make_output(mock_output_state &output)
 static foc_config make_config()
 {
     foc_config config{};
-    config.pole_pairs = 7U;
+    config.pole_pairs = 7;
     config.rotor_direction = 1;
     config.control_period_s = 0.00005f;
     config.bus_voltage_v = 12.0f;
@@ -350,7 +350,7 @@ static foc_snapshot read_snapshot(foc_core &motor)
 {
     foc_snapshot snapshot{};
     foc_topic_access access = motor.topics();
-    assert(access.snapshot.peek(snapshot, 0U));
+    assert(access.snapshot.peek(snapshot, 0));
     return snapshot;
 }
 
@@ -381,26 +381,26 @@ static void test_control_calculation()
     assert(motor.set_target(target) == foc_result::OK);
     assert(motor.enable() == foc_result::OK);
 
-    publish_samples(motor, 1000U, 0.0f, 1.0f, -0.5f, -0.5f);
-    assert(motor.core_loop(1000U) == foc_result::OK);
+    publish_samples(motor, 1000, 0.0f, 1.0f, -0.5f, -0.5f);
+    assert(motor.core_loop(1000) == foc_result::OK);
     foc_snapshot snapshot = read_snapshot(motor);
     assert(nearly_equal(snapshot.i_alpha_a, 1.0f));
     assert(nearly_equal(snapshot.i_beta_a, 0.0f));
     assert(nearly_equal(snapshot.i_d_a, 1.0f));
     assert(nearly_equal(snapshot.i_q_a, 0.0f));
     assert(snapshot.state == foc_state::RUNNING);
-    assert(snapshot.fault_flags == 0U);
+    assert(snapshot.fault_flags == 0);
     assert_duty_in_range(snapshot.duty);
     uint32_t first_snapshot_sequence = snapshot.sequence;
 
-    publish_samples(motor, 1500U, 0.0f, 1.0f, -0.5f, -0.5f);
-    assert(motor.core_loop(1500U) == foc_result::OK);
+    publish_samples(motor, 1500, 0.0f, 1.0f, -0.5f, -0.5f);
+    assert(motor.core_loop(1500) == foc_result::OK);
     snapshot = read_snapshot(motor);
     assert(snapshot.sequence == first_snapshot_sequence);
 
-    publish_samples(motor, 2000U, HALF_PI / 7.0f,
+    publish_samples(motor, 2000, HALF_PI / 7.0f,
         1.0f, -0.5f, -0.5f);
-    assert(motor.core_loop(2000U) == foc_result::OK);
+    assert(motor.core_loop(2000) == foc_result::OK);
     snapshot = read_snapshot(motor);
     assert(snapshot.sequence > first_snapshot_sequence);
     assert(nearly_equal(snapshot.i_d_a, 0.0f));
@@ -433,10 +433,10 @@ static void test_instances_and_fault_recovery()
     assert(left_motor.enable() == foc_result::OK);
     assert(right_motor.enable() == foc_result::OK);
 
-    publish_samples(left_motor, 1000U, 0.0f, 0.0f, 0.0f, 0.0f);
-    publish_samples(right_motor, 1000U, 0.0f, 0.0f, 0.0f, 0.0f);
-    assert(left_motor.core_loop(1000U) == foc_result::OK);
-    assert(right_motor.core_loop(1000U) == foc_result::OK);
+    publish_samples(left_motor, 1000, 0.0f, 0.0f, 0.0f, 0.0f);
+    publish_samples(right_motor, 1000, 0.0f, 0.0f, 0.0f, 0.0f);
+    assert(left_motor.core_loop(1000) == foc_result::OK);
+    assert(right_motor.core_loop(1000) == foc_result::OK);
     foc_snapshot left_snapshot = read_snapshot(left_motor);
     foc_snapshot right_snapshot = read_snapshot(right_motor);
     assert(nearly_equal(left_snapshot.target_i_q_a, 0.5f));
@@ -444,21 +444,21 @@ static void test_instances_and_fault_recovery()
     assert(left_snapshot.output_active);
     assert(right_snapshot.output_active);
 
-    publish_samples(left_motor, 2000U, 0.0f, 6.0f, 0.0f, 0.0f);
-    assert(left_motor.core_loop(2000U) == foc_result::OUTPUT_RANGE);
+    publish_samples(left_motor, 2000, 0.0f, 6.0f, 0.0f, 0.0f);
+    assert(left_motor.core_loop(2000) == foc_result::OUTPUT_RANGE);
     left_snapshot = read_snapshot(left_motor);
     right_snapshot = read_snapshot(right_motor);
     assert(left_snapshot.state == foc_state::FAULT);
     assert(!left_snapshot.output_active);
     assert((left_snapshot.fault_flags &
-        foc_fault_mask(foc_fault::OVER_CURRENT)) != 0U);
+        foc_fault_mask(foc_fault::OVER_CURRENT)) != 0);
     assert(!left_output.enabled);
     assert(right_snapshot.state == foc_state::RUNNING);
 
     assert(left_motor.clear_fault() == foc_result::OK);
     left_snapshot = read_snapshot(left_motor);
     assert(left_snapshot.state == foc_state::READY);
-    assert(left_snapshot.fault_flags == 0U);
+    assert(left_snapshot.fault_flags == 0);
     assert(left_motor.enable() == foc_result::DISABLED);
     assert(left_motor.set_target(left_target) == foc_result::OK);
     assert(left_motor.enable() == foc_result::OK);
@@ -480,28 +480,28 @@ static void test_sensor_freshness()
     target.mode = foc_control_mode::CURRENT;
     assert(rotor_motor.set_target(target) == foc_result::OK);
     assert(rotor_motor.enable() == foc_result::OK);
-    publish_samples(rotor_motor, 1000U, 0.0f, 0.0f, 0.0f, 0.0f);
-    assert(rotor_motor.core_loop(1000U) == foc_result::OK);
-    assert(rotor_motor.core_loop(6000U) == foc_result::OK);
-    assert(rotor_motor.core_loop(6001U) == foc_result::SENSOR_ERROR);
+    publish_samples(rotor_motor, 1000, 0.0f, 0.0f, 0.0f, 0.0f);
+    assert(rotor_motor.core_loop(1000) == foc_result::OK);
+    assert(rotor_motor.core_loop(6000) == foc_result::OK);
+    assert(rotor_motor.core_loop(6001) == foc_result::SENSOR_ERROR);
     foc_snapshot snapshot = read_snapshot(rotor_motor);
     assert(snapshot.state == foc_state::FAULT);
     assert((snapshot.fault_flags &
-        foc_fault_mask(foc_fault::ROTOR_SENSOR)) != 0U);
+        foc_fault_mask(foc_fault::ROTOR_SENSOR)) != 0);
 
     mock_output_state current_output;
     foc_core current_motor;
     initialize_motor(current_motor, current_output);
     assert(current_motor.set_target(target) == foc_result::OK);
     assert(current_motor.enable() == foc_result::OK);
-    publish_samples(current_motor, 1000U, 0.0f, 0.0f, 0.0f, 0.0f);
-    assert(current_motor.core_loop(1000U) == foc_result::OK);
-    publish_rotor(current_motor, 6001U, 0.0f);
-    assert(current_motor.core_loop(6001U) == foc_result::SENSOR_ERROR);
+    publish_samples(current_motor, 1000, 0.0f, 0.0f, 0.0f, 0.0f);
+    assert(current_motor.core_loop(1000) == foc_result::OK);
+    publish_rotor(current_motor, 6001, 0.0f);
+    assert(current_motor.core_loop(6001) == foc_result::SENSOR_ERROR);
     snapshot = read_snapshot(current_motor);
     assert(snapshot.state == foc_state::FAULT);
     assert((snapshot.fault_flags &
-        foc_fault_mask(foc_fault::CURRENT_SENSOR)) != 0U);
+        foc_fault_mask(foc_fault::CURRENT_SENSOR)) != 0);
 }
 
 /**
@@ -524,22 +524,22 @@ static void test_isr_loop()
     assert(task_motor.enable() == foc_result::OK);
     assert(isr_motor.enable() == foc_result::OK);
 
-    publish_samples(task_motor, 1000U, 0.0f, 0.0f, 0.0f, 0.0f);
-    assert(task_motor.core_loop(1000U) == foc_result::OK);
+    publish_samples(task_motor, 1000, 0.0f, 0.0f, 0.0f, 0.0f);
+    assert(task_motor.core_loop(1000) == foc_result::OK);
 
     BaseType_t higher_priority_task_woken = pdFALSE;
-    publish_samples_from_isr(isr_motor, 1000U, 0.0f,
+    publish_samples_from_isr(isr_motor, 1000, 0.0f,
         higher_priority_task_woken);
-    foc_host_queue::task_peek_calls.store(0U);
-    foc_host_queue::isr_peek_calls.store(0U);
-    foc_host_queue::isr_overwrite_calls.store(0U);
-    assert(isr_motor.core_loop_from_isr(1000U,
+    foc_host_queue::task_peek_calls.store(0);
+    foc_host_queue::isr_peek_calls.store(0);
+    foc_host_queue::isr_overwrite_calls.store(0);
+    assert(isr_motor.core_loop_from_isr(1000,
         higher_priority_task_woken) == foc_result::OK);
     assert(task_output.isr_apply_called == false);
     assert(isr_output.isr_apply_called);
-    assert(foc_host_queue::task_peek_calls.load() == 0U);
-    assert(foc_host_queue::isr_peek_calls.load() >= 3U);
-    assert(foc_host_queue::isr_overwrite_calls.load() >= 1U);
+    assert(foc_host_queue::task_peek_calls.load() == 0);
+    assert(foc_host_queue::isr_peek_calls.load() >= 3);
+    assert(foc_host_queue::isr_overwrite_calls.load() >= 1);
 
     foc_snapshot task_snapshot = read_snapshot(task_motor);
     foc_snapshot isr_snapshot = read_snapshot(isr_motor);
@@ -582,7 +582,7 @@ static void test_invalid_inputs_and_driver_fault()
     foc_snapshot snapshot = read_snapshot(motor);
     assert(snapshot.state == foc_state::FAULT);
     assert((snapshot.fault_flags & foc_fault_mask(foc_fault::DRIVER)) !=
-        0U);
+        0);
     assert(motor.clear_fault() == foc_result::DRIVER_FAULT);
     output.driver_fault = false;
     assert(motor.clear_fault() == foc_result::OK);
@@ -603,16 +603,16 @@ static void test_concurrent_topics()
     initial_target.q_axis_current_a = -0.25f;
     assert(motor.set_target(initial_target) == foc_result::OK);
     assert(motor.enable() == foc_result::OK);
-    publish_samples(motor, 1000U, 0.0f, 0.0f, 0.0f, 0.0f);
+    publish_samples(motor, 1000, 0.0f, 0.0f, 0.0f, 0.0f);
 
     std::atomic<bool> writer_complete{false};
     std::atomic<bool> readers_stop{false};
     std::thread target_writer(
         [&motor, &writer_complete]()
         {
-            for(uint32_t index = 1U; index <= 20000U; index++)
+            for(uint32_t index = 1; index <= 20000; index++)
             {
-                float target_current_a = static_cast<float>(index % 1000U) *
+                float target_current_a = static_cast<float>(index % 1000) *
                     0.001f;
                 foc_target target{};
                 target.mode = foc_control_mode::CURRENT;
@@ -634,10 +634,10 @@ static void test_concurrent_topics()
     std::thread first_snapshot_reader(snapshot_reader);
     std::thread second_snapshot_reader(snapshot_reader);
 
-    for(uint32_t index = 0U; index < 20000U ||
+    for(uint32_t index = 0; index < 20000 ||
         !writer_complete.load(std::memory_order_acquire); index++)
     {
-        uint32_t timestamp_us = 1000U + index * 1000U;
+        uint32_t timestamp_us = 1000 + index * 1000;
         publish_samples(motor, timestamp_us, 0.0f, 0.0f, 0.0f,
             0.0f);
         assert(motor.core_loop(timestamp_us) == foc_result::OK);

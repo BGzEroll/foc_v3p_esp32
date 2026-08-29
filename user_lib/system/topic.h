@@ -5,13 +5,7 @@
 #include "freertos/queue.h"
 #include <stdint.h>
 #include <type_traits>
-
-#if defined(ESP_PLATFORM)
 #include "esp_attr.h"
-#define TOPIC_IRAM_ATTR IRAM_ATTR
-#else
-#define TOPIC_IRAM_ATTR
-#endif
 
 namespace topic
 {
@@ -48,7 +42,7 @@ namespace topic
             {
                 if(queue_handle){return true;}
 
-                queue_handle = xQueueCreateStatic(1U,
+                queue_handle = xQueueCreateStatic(1,
                     sizeof(item_type),
                     queue_storage,
                     &queue_control);
@@ -80,7 +74,7 @@ namespace topic
              * @note Queue 收到首个快照后会一直保持非空，wait_ticks 不能用于
              *       等待下一次更新。消费者应使用 sequence 判断是否出现新样本。
              */
-            bool peek(item_type &item, TickType_t wait_ticks = 0U) const
+            bool peek(item_type &item, TickType_t wait_ticks = 0) const
             {
                 if(!queue_handle){return false;}
                 return xQueuePeek(queue_handle,
@@ -99,7 +93,7 @@ namespace topic
              * @note 调用方必须在首次使用前将 higher_priority_task_woken 初始化为
              *       pdFALSE，并在退出 ISR 前调用 portYIELD_FROM_ISR()。
              */
-            bool TOPIC_IRAM_ATTR publish_from_isr(const item_type &item,
+            bool IRAM_ATTR publish_from_isr(const item_type &item,
                 BaseType_t &higher_priority_task_woken)
             {
                 if(!queue_handle){return false;}
@@ -115,7 +109,7 @@ namespace topic
              *
              * @return 成功取得快照时返回 true
              */
-            bool TOPIC_IRAM_ATTR peek_from_isr(item_type &item) const
+            bool IRAM_ATTR peek_from_isr(item_type &item) const
             {
                 if(!queue_handle){return false;}
                 return xQueuePeekFromISR(queue_handle, &item) == pdPASS;
@@ -150,7 +144,7 @@ namespace topic
     template<typename item_type, UBaseType_t QUEUE_LENGTH>
     class fifo_topic
     {
-        static_assert(QUEUE_LENGTH > 0U,
+        static_assert(QUEUE_LENGTH > 0,
             "fifo_topic QUEUE_LENGTH must be greater than zero");
         static_assert(std::is_trivially_copyable<item_type>::value,
             "fifo_topic item_type must be trivially copyable");
@@ -191,7 +185,7 @@ namespace topic
              * @return 成功写入消息时返回 true
              */
             bool publish(const item_type &item,
-                TickType_t wait_ticks = 0U)
+                TickType_t wait_ticks = 0)
             {
                 if(!queue_handle){return false;}
                 return xQueueSendToBack(queue_handle,
@@ -208,7 +202,7 @@ namespace topic
              * @return 成功取得消息时返回 true
              */
             bool receive(item_type &item,
-                TickType_t wait_ticks = 0U)
+                TickType_t wait_ticks = 0)
             {
                 if(!queue_handle){return false;}
                 return xQueueReceive(queue_handle,
@@ -224,7 +218,7 @@ namespace topic
              *
              * @return 成功写入消息时返回 true
              */
-            bool TOPIC_IRAM_ATTR publish_from_isr(const item_type &item,
+            bool IRAM_ATTR publish_from_isr(const item_type &item,
                 BaseType_t &higher_priority_task_woken)
             {
                 if(!queue_handle){return false;}
@@ -240,7 +234,7 @@ namespace topic
              *
              * @return 成功取得消息时返回 true
              */
-            bool TOPIC_IRAM_ATTR receive_from_isr(item_type &item,
+            bool IRAM_ATTR receive_from_isr(item_type &item,
                 BaseType_t &higher_priority_task_woken)
             {
                 if(!queue_handle){return false;}
@@ -256,7 +250,7 @@ namespace topic
              */
             UBaseType_t waiting_count() const
             {
-                if(!queue_handle){return 0U;}
+                if(!queue_handle){return 0;}
                 return uxQueueMessagesWaiting(queue_handle);
             }
 
@@ -277,7 +271,5 @@ namespace topic
             QueueHandle_t queue_handle = nullptr;
     };
 }
-
-#undef TOPIC_IRAM_ATTR
 
 #endif

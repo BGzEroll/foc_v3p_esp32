@@ -35,7 +35,7 @@ enum class foc_control_mode : uint8_t
 
 enum class foc_fault : uint32_t
 {
-    NONE = 0U,
+    NONE = 0,
     ROTOR_SENSOR = 1U << 0,
     CURRENT_SENSOR = 1U << 1,
     OVER_CURRENT = 1U << 2,
@@ -54,8 +54,8 @@ struct pi_config
 
 struct rotor_sample
 {
-    uint32_t sequence = 0U;
-    uint32_t timestamp_us = 0U;
+    uint32_t sequence = 0;
+    uint32_t timestamp_us = 0;
     float mechanical_angle_rad = 0.0f;
     float mechanical_velocity_rad_s = 0.0f;
     bool valid = false;
@@ -63,8 +63,8 @@ struct rotor_sample
 
 struct phase_current_sample
 {
-    uint32_t sequence = 0U;
-    uint32_t timestamp_us = 0U;
+    uint32_t sequence = 0;
+    uint32_t timestamp_us = 0;
     float phase_a_a = 0.0f;
     float phase_b_a = 0.0f;
     float phase_c_a = 0.0f;
@@ -80,7 +80,7 @@ struct phase_duty
 
 struct foc_config
 {
-    uint8_t pole_pairs = 0U;
+    uint8_t pole_pairs = 0;
     int8_t rotor_direction = 1;
     float electrical_zero_offset_rad = 0.0f;
     float control_period_s = 0.00005f;
@@ -93,8 +93,8 @@ struct foc_config
 
 struct foc_target
 {
-    uint32_t sequence = 0U;
-    uint32_t timestamp_us = 0U;
+    uint32_t sequence = 0;
+    uint32_t timestamp_us = 0;
     foc_control_mode mode = foc_control_mode::DISABLED;
     float d_axis_current_a = 0.0f;
     float q_axis_current_a = 0.0f;
@@ -102,10 +102,10 @@ struct foc_target
 
 struct foc_snapshot
 {
-    uint32_t sequence = 0U;
-    uint32_t timestamp_us = 0U;
+    uint32_t sequence = 0;
+    uint32_t timestamp_us = 0;
     foc_state state = foc_state::UNINITIALIZED;
-    uint32_t fault_flags = 0U;
+    uint32_t fault_flags = 0;
     bool output_active = false;
     float mechanical_angle_rad = 0.0f;
     float mechanical_velocity_rad_s = 0.0f;

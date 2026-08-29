@@ -8,8 +8,8 @@
  */
 leds::leds(gpio_num_t pin, uint32_t on_level)
     : pin(pin),
-      on_level(on_level ? 1U : 0U),
-      current_level(on_level ? 0U : 1U),
+      on_level(on_level ? 1 : 0),
+      current_level(on_level ? 0 : 1),
       initialized(false)
 {
 }
@@ -31,7 +31,7 @@ esp_err_t leds::init()
     esp_err_t result = gpio_config(&config);
     if(result != ESP_OK){return result;}
 
-    current_level = on_level ? 0U : 1U;
+    current_level = on_level ? 0 : 1;
     result = gpio_set_level(pin, current_level);
     if(result != ESP_OK){return result;}
 
@@ -59,7 +59,7 @@ void leds::off()
 {
     if(!initialized){return;}
 
-    uint32_t off_level = on_level ? 0U : 1U;
+    uint32_t off_level = on_level ? 0 : 1;
     if(gpio_set_level(pin, off_level) == ESP_OK)
     {
         current_level = off_level;
@@ -73,7 +73,7 @@ void leds::toggle()
 {
     if(!initialized){return;}
 
-    uint32_t next_level = current_level ? 0U : 1U;
+    uint32_t next_level = current_level ? 0 : 1;
     if(gpio_set_level(pin, next_level) == ESP_OK)
     {
         current_level = next_level;

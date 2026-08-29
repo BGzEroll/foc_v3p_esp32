@@ -48,7 +48,7 @@ class i2c_bus
 class i2c_device
 {
     public:
-        static constexpr uint32_t DEFAULT_TRANSFER_TIMEOUT_MS = 50U;
+        static constexpr uint32_t DEFAULT_TRANSFER_TIMEOUT_MS = 50;
 
         i2c_device(i2c_bus &bus,
             uint8_t device_address,
