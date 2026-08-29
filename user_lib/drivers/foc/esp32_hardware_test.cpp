@@ -59,11 +59,20 @@ static constexpr int8_t MOTOR_ROTOR_DIRECTION = -1;
 static constexpr float MOTOR_BUS_VOLTAGE_V = 12.0f;
 static constexpr float MOTOR_VOLTAGE_LIMIT_V = 2.0f;
 static constexpr float MOTOR_MAX_PHASE_CURRENT_A = 0.2f;
-static constexpr float MOTOR_TARGET_Q_CURRENT_A = 0.05f;
+static constexpr float OPEN_LOOP_TARGET_Q_CURRENT_A = 0.08f;
 static constexpr float MOTOR_CONTROL_PERIOD_S = 0.001f;
 static constexpr float CURRENT_PI_KP = 0.54f;
 static constexpr float CURRENT_PI_KI = 400.0f;
 static constexpr float CURRENT_PI_INTEGRAL_LIMIT_V = 1.0f;
+
+static constexpr float OPEN_LOOP_TARGET_MECHANICAL_SPEED_RAD_S = 1.0f;
+static constexpr float OPEN_LOOP_ELECTRICAL_SPEED_RAD_S =
+    static_cast<float>(MOTOR_ROTOR_DIRECTION) *
+    static_cast<float>(MOTOR_POLE_PAIRS) *
+    OPEN_LOOP_TARGET_MECHANICAL_SPEED_RAD_S;
+static constexpr float OPEN_LOOP_ELECTRICAL_ACCEL_RAD_S2 = 10.0f;
+static constexpr float MOTOR_MAX_MECHANICAL_SPEED_RAD_S = 30.0f;
+static constexpr float SPEED_FILTER_ALPHA = 0.2f;
 
 static constexpr float CURRENT_SHUNT_RESISTOR_OHM = 0.01f;
 static constexpr float CURRENT_AMPLIFIER_GAIN = 50.0f;
@@ -111,6 +120,7 @@ static int64_t encoder_previous_timestamp_us = 0;
 static uint32_t sample_sequence = 0;
 static int32_t bus_sense_voltage_mv = 0;
 static bool bus_sense_read_valid = false;
+static float motor_electrical_zero_offset_rad = 0.0f;
 
 /* ---- 通用硬件辅助函数 ---- */
 
@@ -798,12 +808,10 @@ static bool align_sensor(float &electrical_zero_offset_rad)
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
-    disable_power_stage();
-    vTaskDelay(pdMS_TO_TICKS(20));
-
     float aligned_mechanical_angle_rad = 0.0f;
     if(!read_encoder_angle(aligned_mechanical_angle_rad))
     {
+        disable_power_stage();
         ESP_LOGE(TAG, "传感器对齐后无法读取机械角度");
         return false;
     }
@@ -812,6 +820,8 @@ static bool align_sensor(float &electrical_zero_offset_rad)
         static_cast<float>(MOTOR_ROTOR_DIRECTION) *
         static_cast<float>(MOTOR_POLE_PAIRS) *
         aligned_mechanical_angle_rad);
+    disable_power_stage();
+    vTaskDelay(pdMS_TO_TICKS(20));
     reset_encoder_tracking();
     ESP_LOGI(TAG, "传感器对齐完成: mechanical=%.5f, zero=%.5f",
         aligned_mechanical_angle_rad,
@@ -986,11 +996,11 @@ static foc_output create_foc_output()
 }
 
 /**
- * @brief 读取 GPIO4 母线采样管脚电压
+ * @brief 读取驱动板分压后的 GPIO4 母线采样管脚电压
  *
- * @note 当前没有确认外部电阻分压比，因此这里只保存 ADC 管脚电压，不能
- *       将其直接当作 12 V 母线电压。GPIO4 属于经典 ESP32 的 ADC2；以后启
- *       用 Wi-Fi 后该采样可能不可用。
+ * @note GPIO4 接收的是驱动板已经分压后的电压。由于尚未确认分压电阻比，
+ *       当前只记录管脚电压，FOC 母线配置仍使用已知的 12 V。GPIO4 属于
+ *       经典 ESP32 的 ADC2；以后启用 Wi-Fi 后该采样可能不可用。
  */
 static void read_bus_sense()
 {
@@ -1011,8 +1021,9 @@ static void read_bus_sense()
  *
  * @param argument FreeRTOS 任务参数
  *
- * @note 任务每 1 ms 读取 ADC 和 AS5600，向 Topic 发布样本，再运行一次
- *       任务上下文的 FOC 电流环。当前没有使用 ISR 控制路径。
+ * @note 任务每 1 ms 读取 ADC 和 AS5600，向 Topic 发布样本，生成低速强制角
+ *       样本，再运行一次任务上下文的 FOC 电流环。真实 AS5600 角度只用于
+ *       速度观察和超速保护；当前没有使用 ISR 控制路径。
  */
 static void foc_control_task_entry(void *argument)
 {
@@ -1022,6 +1033,11 @@ static void foc_control_task_entry(void *argument)
     bool motor_started = false;
     bool test_finished = false;
     bool start_error_reported = false;
+    bool speed_filter_valid = false;
+    float filtered_mechanical_speed_rad_s = 0.0f;
+    bool open_loop_angle_valid = false;
+    float open_loop_electrical_angle_rad = 0.0f;
+    float open_loop_electrical_speed_rad_s = 0.0f;
     int64_t last_log_us = task_start_us;
 
     while(true)
@@ -1043,6 +1059,23 @@ static void foc_control_task_entry(void *argument)
             sequence,
             rotor);
 
+        if(rotor_valid)
+        {
+            if(!speed_filter_valid)
+            {
+                filtered_mechanical_speed_rad_s =
+                    rotor.mechanical_velocity_rad_s;
+                speed_filter_valid = true;
+            }
+            else
+            {
+                filtered_mechanical_speed_rad_s +=
+                    SPEED_FILTER_ALPHA *
+                    (rotor.mechanical_velocity_rad_s -
+                        filtered_mechanical_speed_rad_s);
+            }
+        }
+
         read_bus_sense();
         topics.current.publish(current);
         topics.rotor.publish(rotor);
@@ -1058,8 +1091,10 @@ static void foc_control_task_entry(void *argument)
                 if(result == foc_result::OK)
                 {
                     motor_started = true;
-                    ESP_LOGI(TAG, "进入电流环: Id=0.000 A, Iq=%.3f A",
-                        MOTOR_TARGET_Q_CURRENT_A);
+                    ESP_LOGI(TAG,
+                        "进入低速强制角: target=%.2f rad/s, q=%.3f A",
+                        OPEN_LOOP_TARGET_MECHANICAL_SPEED_RAD_S,
+                        OPEN_LOOP_TARGET_Q_CURRENT_A);
                 }
                 else if(!start_error_reported)
                 {
@@ -1073,15 +1108,110 @@ static void foc_control_task_entry(void *argument)
         foc_result loop_result = foc_result::NOT_READY;
         if(motor_started)
         {
-            uint32_t control_timestamp_us =
-                static_cast<uint32_t>(now_us);
-            loop_result = motor.core_loop(control_timestamp_us);
-            if(loop_result != foc_result::OK &&
-                loop_result != foc_result::DISABLED)
+            if(speed_filter_valid &&
+                absolute_value(filtered_mechanical_speed_rad_s) >
+                    MOTOR_MAX_MECHANICAL_SPEED_RAD_S)
             {
-                ESP_LOGE(TAG, "FOC 控制周期失败，已停机: %d",
-                    static_cast<int>(loop_result));
+                motor.disable();
                 motor_started = false;
+                test_finished = true;
+                ESP_LOGE(TAG,
+                    "机械速度超限，已停机: speed=%.3f rad/s",
+                    filtered_mechanical_speed_rad_s);
+            }
+            else
+            {
+                if(!open_loop_angle_valid)
+                {
+                    open_loop_electrical_angle_rad = normalize_angle(
+                        static_cast<float>(MOTOR_ROTOR_DIRECTION) *
+                        static_cast<float>(MOTOR_POLE_PAIRS) *
+                        rotor.mechanical_angle_rad -
+                        motor_electrical_zero_offset_rad);
+                    open_loop_angle_valid = true;
+                }
+
+                float electrical_speed_step_rad_s =
+                    OPEN_LOOP_ELECTRICAL_ACCEL_RAD_S2 *
+                    MOTOR_CONTROL_PERIOD_S;
+                if(open_loop_electrical_speed_rad_s <
+                    OPEN_LOOP_ELECTRICAL_SPEED_RAD_S)
+                {
+                    open_loop_electrical_speed_rad_s +=
+                        electrical_speed_step_rad_s;
+                    if(open_loop_electrical_speed_rad_s >
+                        OPEN_LOOP_ELECTRICAL_SPEED_RAD_S)
+                    {
+                        open_loop_electrical_speed_rad_s =
+                            OPEN_LOOP_ELECTRICAL_SPEED_RAD_S;
+                    }
+                }
+                else if(open_loop_electrical_speed_rad_s >
+                    OPEN_LOOP_ELECTRICAL_SPEED_RAD_S)
+                {
+                    open_loop_electrical_speed_rad_s -=
+                        electrical_speed_step_rad_s;
+                    if(open_loop_electrical_speed_rad_s <
+                        OPEN_LOOP_ELECTRICAL_SPEED_RAD_S)
+                    {
+                        open_loop_electrical_speed_rad_s =
+                            OPEN_LOOP_ELECTRICAL_SPEED_RAD_S;
+                    }
+                }
+                open_loop_electrical_angle_rad +=
+                    open_loop_electrical_speed_rad_s *
+                    MOTOR_CONTROL_PERIOD_S;
+
+                foc_target open_loop_target{};
+                open_loop_target.timestamp_us =
+                    static_cast<uint32_t>(now_us);
+                open_loop_target.mode = foc_control_mode::CURRENT;
+                open_loop_target.d_axis_current_a = 0.0f;
+                open_loop_target.q_axis_current_a =
+                    OPEN_LOOP_TARGET_Q_CURRENT_A;
+                foc_result target_result = motor.set_target(open_loop_target);
+                if(target_result != foc_result::OK)
+                {
+                    motor.disable();
+                    motor_started = false;
+                    test_finished = true;
+                    ESP_LOGE(TAG, "更新强制角测试目标失败，已停机: %d",
+                        static_cast<int>(target_result));
+                }
+                else
+                {
+                    float direction_and_pole_pairs =
+                        static_cast<float>(MOTOR_ROTOR_DIRECTION) *
+                        static_cast<float>(MOTOR_POLE_PAIRS);
+                    rotor_sample control_rotor = rotor;
+                    control_rotor.mechanical_angle_rad =
+                        (open_loop_electrical_angle_rad +
+                            motor_electrical_zero_offset_rad) /
+                        direction_and_pole_pairs;
+                    control_rotor.mechanical_velocity_rad_s =
+                        open_loop_electrical_speed_rad_s /
+                        direction_and_pole_pairs;
+                    if(!topics.rotor.publish(control_rotor))
+                    {
+                        motor.disable();
+                        motor_started = false;
+                        test_finished = true;
+                        ESP_LOGE(TAG, "发布强制角样本失败，已停机");
+                    }
+                    else
+                    {
+                        uint32_t control_timestamp_us =
+                            static_cast<uint32_t>(now_us);
+                        loop_result = motor.core_loop(control_timestamp_us);
+                        if(loop_result != foc_result::OK &&
+                            loop_result != foc_result::DISABLED)
+                        {
+                            ESP_LOGE(TAG, "FOC 控制周期失败，已停机: %d",
+                                static_cast<int>(loop_result));
+                            motor_started = false;
+                        }
+                    }
+                }
             }
         }
 
@@ -1105,7 +1235,9 @@ static void foc_control_task_entry(void *argument)
             {
                 ESP_LOGI(TAG,
                     "state=%d loop=%d Ia=%.3f Ib=%.3f Ic=%.3f "
-                    "Id=%.3f Iq=%.3f angle=%.3f bus_pin=%d mV",
+                    "Id=%.3f Iq=%.3f Iq_target=%.3f speed=%.3f "
+                    "field_speed=%.3f encoder_angle=%.3f field_angle=%.3f "
+                    "control_angle=%.3f bus_pin=%d mV",
                     static_cast<int>(snapshot.state),
                     static_cast<int>(loop_result),
                     snapshot.phase_a_current_a,
@@ -1113,6 +1245,11 @@ static void foc_control_task_entry(void *argument)
                     snapshot.phase_c_current_a,
                     snapshot.i_d_a,
                     snapshot.i_q_a,
+                    snapshot.target_i_q_a,
+                    filtered_mechanical_speed_rad_s,
+                    open_loop_electrical_speed_rad_s,
+                    rotor.mechanical_angle_rad,
+                    open_loop_electrical_angle_rad,
                     snapshot.mechanical_angle_rad,
                     static_cast<int>(logged_bus_sense_mv));
             }
@@ -1138,8 +1275,9 @@ static void foc_control_task_entry(void *argument)
  * @brief 初始化 ESP32 V3P 单电机 FOC 硬件测试
  *
  * @note 该测试会先保持 EN 低电平，校准电流零点，使用 0.4 V 固定电压矢量
- *       对齐 AS5600，然后延时 1 s 自动进入 0.05 A 的 q 轴电流目标，运行 60 s
- *       后自动停机。没有硬件故障输入，保护依靠电流采样和 foc_core 软件限幅。
+ *       对齐 AS5600，然后延时 1 s 自动进入低速强制角测试。强制角目标机械
+ *       速度为 1 rad/s，q 轴电流目标为 0.08 A，运行 60 s 后自动停机。没有
+ *       硬件故障输入，保护依靠电流采样、机械速度检查和 foc_core 软件限幅。
  */
 void esp32_hardware_test::init()
 {
@@ -1190,6 +1328,7 @@ void esp32_hardware_test::init()
     }
 
     foc_config config{};
+    motor_electrical_zero_offset_rad = electrical_zero_offset_rad;
     config.pole_pairs = MOTOR_POLE_PAIRS;
     config.rotor_direction = MOTOR_ROTOR_DIRECTION;
     config.electrical_zero_offset_rad = electrical_zero_offset_rad;
@@ -1236,9 +1375,10 @@ void esp32_hardware_test::init()
     }
 
     foc_target target{};
+    target.timestamp_us = static_cast<uint32_t>(esp_timer_get_time());
     target.mode = foc_control_mode::CURRENT;
     target.d_axis_current_a = 0.0f;
-    target.q_axis_current_a = MOTOR_TARGET_Q_CURRENT_A;
+    target.q_axis_current_a = OPEN_LOOP_TARGET_Q_CURRENT_A;
     result = motor.set_target(target);
     if(result != foc_result::OK)
     {
@@ -1249,12 +1389,15 @@ void esp32_hardware_test::init()
 
     ESP_LOGI(TAG,
         "硬件测试就绪: PWM=%d Hz, bus=%.1f V, shunt=%.3f ohm, gain=%.1f, "
-        "current_scale=%.4f A/mV, auto_start=%d",
+        "current_scale=%.4f A/mV, force_speed=%.2f rad/s, "
+        "q_target=%.3f A, auto_start=%d",
         static_cast<int>(PWM_FREQUENCY_HZ),
         MOTOR_BUS_VOLTAGE_V,
         CURRENT_SHUNT_RESISTOR_OHM,
         CURRENT_AMPLIFIER_GAIN,
         CURRENT_SCALE_A_PER_MV,
+        OPEN_LOOP_TARGET_MECHANICAL_SPEED_RAD_S,
+        OPEN_LOOP_TARGET_Q_CURRENT_A,
         1);
 
     BaseType_t task_result = xTaskCreate(foc_control_task_entry,
