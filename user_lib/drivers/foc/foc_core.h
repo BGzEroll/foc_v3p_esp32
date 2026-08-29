@@ -128,22 +128,22 @@ class foc_core
         static constexpr float MAX_SVPWM_VOLTAGE_RATIO =
             0.57735026918962576451f;
 
-        foc_config config_{};
-        foc_output output_{};
-        topic::latest_topic<foc_target> target_topic_;
-        topic::latest_topic<rotor_sample> rotor_topic_;
-        topic::latest_topic<phase_current_sample> current_topic_;
-        topic::latest_topic<foc_snapshot> snapshot_topic_;
-        foc_target active_target_{};
-        foc_runtime runtime_{};
-        foc_state state_ = foc_state::UNINITIALIZED;
-        uint32_t fault_flags_ = 0;
-        bool output_active_ = false;
-        bool initialized_ = false;
-        uint32_t target_sequence_ = 0;
-        uint32_t snapshot_sequence_ = 0;
-        uint32_t last_snapshot_timestamp_us_ = 0;
-        bool snapshot_has_timestamp_ = false;
+        foc_config config{};
+        foc_output output{};
+        topic::latest_topic<foc_target> target_topic;
+        topic::latest_topic<rotor_sample> rotor_topic;
+        topic::latest_topic<phase_current_sample> current_topic;
+        topic::latest_topic<foc_snapshot> snapshot_topic;
+        foc_target active_target{};
+        foc_runtime runtime{};
+        foc_state state = foc_state::UNINITIALIZED;
+        uint32_t fault_flags = 0;
+        bool output_active = false;
+        bool initialized = false;
+        uint32_t target_sequence = 0;
+        uint32_t snapshot_sequence = 0;
+        uint32_t last_snapshot_timestamp_us = 0;
+        bool snapshot_has_timestamp = false;
 };
 
 #endif

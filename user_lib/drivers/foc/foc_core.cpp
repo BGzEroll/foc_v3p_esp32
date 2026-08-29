@@ -1,11 +1,6 @@
 #include "foc_core.h"
 
-#if defined(ESP_PLATFORM)
 #include "esp_attr.h"
-#define FOC_IRAM_ATTR IRAM_ATTR
-#else
-#define FOC_IRAM_ATTR
-#endif
 
 /* ---- FOC 内部数学类型和常量 ---- */
 
@@ -13,8 +8,7 @@ static constexpr float PI = 3.14159265358979323846f;
 static constexpr float HALF_PI = 1.57079632679489661923f;
 static constexpr float THREE_HALF_PI = 4.71238898038468985769f;
 static constexpr float TWO_PI = 6.28318530717958647692f;
-static constexpr float ONE_OVER_TWO_PI =
-    0.15915494309189533577f;
+static constexpr float ONE_OVER_TWO_PI = 0.15915494309189533577f;
 static constexpr float TWO_OVER_THREE = 0.66666666666666666667f;
 static constexpr float SQRT_THREE_OVER_TWO = 0.86602540378443864676f;
 static constexpr float MAX_TURN_COUNT = 2147483000.0f;
@@ -53,7 +47,7 @@ struct alpha_beta_voltage
  *
  * @return IEEE 754 单精度位模式
  */
-static uint32_t FOC_IRAM_ATTR float_to_bits(float value)
+static uint32_t IRAM_ATTR float_to_bits(float value)
 {
     uint32_t bits = 0;
     __builtin_memcpy(&bits, &value, sizeof(bits));
@@ -67,7 +61,7 @@ static uint32_t FOC_IRAM_ATTR float_to_bits(float value)
  *
  * @return 构造出的浮点数
  */
-static float FOC_IRAM_ATTR bits_to_float(uint32_t bits)
+static float IRAM_ATTR bits_to_float(uint32_t bits)
 {
     float value = 0.0f;
     __builtin_memcpy(&value, &bits, sizeof(value));
@@ -81,7 +75,7 @@ static float FOC_IRAM_ATTR bits_to_float(uint32_t bits)
  *
  * @return 为有限值时返回 true
  */
-static bool FOC_IRAM_ATTR is_finite_number(float value)
+static bool IRAM_ATTR is_finite_number(float value)
 {
     return (float_to_bits(value) & FLOAT_EXPONENT_MASK) !=
         FLOAT_EXPONENT_MASK;
@@ -94,7 +88,7 @@ static bool FOC_IRAM_ATTR is_finite_number(float value)
  *
  * @return 绝对值
  */
-static float FOC_IRAM_ATTR absolute_value(float value)
+static float IRAM_ATTR absolute_value(float value)
 {
     return bits_to_float(float_to_bits(value) & ~FLOAT_SIGN_MASK);
 }
@@ -107,7 +101,7 @@ static float FOC_IRAM_ATTR absolute_value(float value)
  *
  * @return 较大值
  */
-static float FOC_IRAM_ATTR maximum_value(float left, float right)
+static float IRAM_ATTR maximum_value(float left, float right)
 {
     return left > right ? left : right;
 }
@@ -120,7 +114,7 @@ static float FOC_IRAM_ATTR maximum_value(float left, float right)
  *
  * @return 较小值
  */
-static float FOC_IRAM_ATTR minimum_value(float left, float right)
+static float IRAM_ATTR minimum_value(float left, float right)
 {
     return left < right ? left : right;
 }
@@ -133,7 +127,7 @@ static float FOC_IRAM_ATTR minimum_value(float left, float right)
  *
  * @return 限幅后的数值
  */
-static float FOC_IRAM_ATTR clamp_symmetric(float value, float limit)
+static float IRAM_ATTR clamp_symmetric(float value, float limit)
 {
     if(value > limit){return limit;}
     if(value < -limit){return -limit;}
@@ -147,7 +141,7 @@ static float FOC_IRAM_ATTR clamp_symmetric(float value, float limit)
  *
  * @return 限制后的占空比
  */
-static float FOC_IRAM_ATTR clamp_duty(float value)
+static float IRAM_ATTR clamp_duty(float value)
 {
     if(value > 1.0f){return 1.0f;}
     if(value < 0.0f){return 0.0f;}
@@ -162,7 +156,7 @@ static float FOC_IRAM_ATTR clamp_duty(float value)
  *
  * @return 输入有效时返回 true
  */
-static bool FOC_IRAM_ATTR normalize_angle(float angle_rad,
+static bool IRAM_ATTR normalize_angle(float angle_rad,
     float &normalized_angle_rad)
 {
     if(!is_finite_number(angle_rad))
@@ -203,7 +197,7 @@ static bool FOC_IRAM_ATTR normalize_angle(float angle_rad,
  *
  * @return 输入有效时返回 true
  */
-static bool FOC_IRAM_ATTR calculate_sin_cos(float angle_rad,
+static bool IRAM_ATTR calculate_sin_cos(float angle_rad,
     float &sine,
     float &cosine)
 {
@@ -268,7 +262,7 @@ static bool FOC_IRAM_ATTR calculate_sin_cos(float angle_rad,
  *
  * @return 输入有效时返回 true
  */
-static bool FOC_IRAM_ATTR calculate_inverse_sqrt(float value,
+static bool IRAM_ATTR calculate_inverse_sqrt(float value,
     float &inverse_sqrt)
 {
     if(!is_finite_number(value) || value <= 0.0f)
@@ -298,7 +292,7 @@ static bool FOC_IRAM_ATTR calculate_inverse_sqrt(float value,
  *
  * @return 输入和计算结果均有效时返回 true
  */
-static bool FOC_IRAM_ATTR calculate_reciprocal(float value,
+static bool IRAM_ATTR calculate_reciprocal(float value,
     float &reciprocal)
 {
     if(!is_finite_number(value) || value <= 0.0f)
@@ -325,7 +319,7 @@ static bool FOC_IRAM_ATTR calculate_reciprocal(float value,
  *
  * @return Alpha-Beta 静止坐标系电流
  */
-static alpha_beta_current FOC_IRAM_ATTR clarke(
+static alpha_beta_current IRAM_ATTR clarke(
     const phase_current_sample &current)
 {
     alpha_beta_current result{};
@@ -345,7 +339,7 @@ static alpha_beta_current FOC_IRAM_ATTR clarke(
  *
  * @return D-Q 旋转坐标系电流
  */
-static d_q_current FOC_IRAM_ATTR park(
+static d_q_current IRAM_ATTR park(
     const alpha_beta_current &current,
     float electrical_angle_rad)
 {
@@ -367,7 +361,7 @@ static d_q_current FOC_IRAM_ATTR park(
  *
  * @return Alpha-Beta 静止坐标系电压
  */
-static alpha_beta_voltage FOC_IRAM_ATTR inverse_park(
+static alpha_beta_voltage IRAM_ATTR inverse_park(
     const d_q_voltage &voltage,
     float electrical_angle_rad)
 {
@@ -394,7 +388,7 @@ static alpha_beta_voltage FOC_IRAM_ATTR inverse_park(
  *
  * @return 输入和计算结果均有效时返回 true
  */
-static bool FOC_IRAM_ATTR run_pi(float target,
+static bool IRAM_ATTR run_pi(float target,
     float measured,
     float period_s,
     const pi_config &config,
@@ -441,7 +435,7 @@ static bool FOC_IRAM_ATTR run_pi(float target,
  *
  * @return 输入和计算结果均有效时返回 true
  */
-static bool FOC_IRAM_ATTR limit_voltage(d_q_voltage &voltage,
+static bool IRAM_ATTR limit_voltage(d_q_voltage &voltage,
     float magnitude_limit_v)
 {
     if(!is_finite_number(voltage.d_v) || !is_finite_number(voltage.q_v) ||
@@ -486,7 +480,7 @@ static bool FOC_IRAM_ATTR limit_voltage(d_q_voltage &voltage,
  *
  * @return 输入有效且未发生占空比限幅时返回 true
  */
-static bool FOC_IRAM_ATTR svpwm(const alpha_beta_voltage &voltage,
+static bool IRAM_ATTR svpwm(const alpha_beta_voltage &voltage,
     float bus_voltage_v,
     phase_duty &duty)
 {
@@ -589,7 +583,7 @@ bool foc_core::valid_config(const foc_config &config) const
  *
  * @return 目标有效时返回 true
  */
-bool FOC_IRAM_ATTR foc_core::valid_target(const foc_target &target) const
+bool IRAM_ATTR foc_core::valid_target(const foc_target &target) const
 {
     if(target.mode != foc_control_mode::DISABLED &&
         target.mode != foc_control_mode::CURRENT)
@@ -606,8 +600,8 @@ bool FOC_IRAM_ATTR foc_core::valid_target(const foc_target &target) const
     float target_magnitude_squared_a2 =
         target.d_axis_current_a * target.d_axis_current_a +
         target.q_axis_current_a * target.q_axis_current_a;
-    float current_limit_squared_a2 = config_.max_phase_current_a *
-        config_.max_phase_current_a;
+    float current_limit_squared_a2 = config.max_phase_current_a *
+        config.max_phase_current_a;
     return is_finite_number(target_magnitude_squared_a2) &&
         is_finite_number(current_limit_squared_a2) &&
         target_magnitude_squared_a2 <= current_limit_squared_a2;
@@ -621,7 +615,7 @@ bool FOC_IRAM_ATTR foc_core::valid_target(const foc_target &target) const
  *
  * @return 样本可用于控制时返回 true
  */
-bool FOC_IRAM_ATTR foc_core::valid_rotor_sample(
+bool IRAM_ATTR foc_core::valid_rotor_sample(
     const rotor_sample &sample,
     uint32_t timestamp_us) const
 {
@@ -639,7 +633,7 @@ bool FOC_IRAM_ATTR foc_core::valid_rotor_sample(
  *
  * @return 样本可用于控制时返回 true
  */
-bool FOC_IRAM_ATTR foc_core::valid_current_sample(
+bool IRAM_ATTR foc_core::valid_current_sample(
     const phase_current_sample &sample,
     uint32_t timestamp_us) const
 {
@@ -657,8 +651,8 @@ bool FOC_IRAM_ATTR foc_core::valid_current_sample(
  */
 uint32_t foc_core::latest_timestamp_us() const
 {
-    return runtime_.rotor.timestamp_us > runtime_.current.timestamp_us ?
-        runtime_.rotor.timestamp_us : runtime_.current.timestamp_us;
+    return runtime.rotor.timestamp_us > runtime.current.timestamp_us ?
+        runtime.rotor.timestamp_us : runtime.current.timestamp_us;
 }
 
 /**
@@ -667,23 +661,23 @@ uint32_t foc_core::latest_timestamp_us() const
 void foc_core::publish_disabled_target()
 {
     foc_target disabled_target{};
-    disabled_target.sequence = ++target_sequence_;
-    target_topic_.publish(disabled_target);
-    active_target_ = disabled_target;
+    disabled_target.sequence = ++target_sequence;
+    target_topic.publish(disabled_target);
+    active_target = disabled_target;
 }
 
 /**
  * @brief 清零 PI、控制电压并恢复中性占空比
  */
-void FOC_IRAM_ATTR foc_core::reset_control_output()
+void IRAM_ATTR foc_core::reset_control_output()
 {
-    runtime_.u_d_v = 0.0f;
-    runtime_.u_q_v = 0.0f;
-    runtime_.u_alpha_v = 0.0f;
-    runtime_.u_beta_v = 0.0f;
-    runtime_.d_integral = 0.0f;
-    runtime_.q_integral = 0.0f;
-    runtime_.duty = {};
+    runtime.u_d_v = 0.0f;
+    runtime.u_q_v = 0.0f;
+    runtime.u_alpha_v = 0.0f;
+    runtime.u_beta_v = 0.0f;
+    runtime.d_integral = 0.0f;
+    runtime.q_integral = 0.0f;
+    runtime.duty = {};
 }
 
 /**
@@ -691,17 +685,17 @@ void FOC_IRAM_ATTR foc_core::reset_control_output()
  *
  * @param fault 需要记录的故障位
  */
-void FOC_IRAM_ATTR foc_core::enter_fault(foc_fault fault)
+void IRAM_ATTR foc_core::enter_fault(foc_fault fault)
 {
-    fault_flags_ |= foc_fault_mask(fault);
-    if(output_.disable)
+    fault_flags |= foc_fault_mask(fault);
+    if(output.disable)
     {
-        output_.disable(output_.context);
+        output.disable(output.context);
     }
-    output_active_ = false;
-    active_target_ = {};
+    output_active = false;
+    active_target = {};
     reset_control_output();
-    state_ = foc_state::FAULT;
+    state = foc_state::FAULT;
 }
 
 /**
@@ -711,23 +705,23 @@ void FOC_IRAM_ATTR foc_core::enter_fault(foc_fault fault)
  *
  * @return 转子更新结果
  */
-foc_result FOC_IRAM_ATTR foc_core::update_rotor(
+foc_result IRAM_ATTR foc_core::update_rotor(
     const rotor_sample &sample)
 {
-    runtime_.rotor = sample;
-    float direction = static_cast<float>(config_.rotor_direction);
-    float pole_pairs = static_cast<float>(config_.pole_pairs);
+    runtime.rotor = sample;
+    float direction = static_cast<float>(config.rotor_direction);
+    float pole_pairs = static_cast<float>(config.pole_pairs);
     float electrical_angle_rad = direction * pole_pairs *
-        sample.mechanical_angle_rad - config_.electrical_zero_offset_rad;
+        sample.mechanical_angle_rad - config.electrical_zero_offset_rad;
     if(!normalize_angle(electrical_angle_rad,
-        runtime_.electrical_angle_rad))
+        runtime.electrical_angle_rad))
     {
         return foc_result::INVALID_NUMBER;
     }
-    runtime_.electrical_velocity_rad_s = direction * pole_pairs *
+    runtime.electrical_velocity_rad_s = direction * pole_pairs *
         sample.mechanical_velocity_rad_s;
-    if(!is_finite_number(runtime_.electrical_angle_rad) ||
-        !is_finite_number(runtime_.electrical_velocity_rad_s))
+    if(!is_finite_number(runtime.electrical_angle_rad) ||
+        !is_finite_number(runtime.electrical_velocity_rad_s))
     {
         return foc_result::INVALID_NUMBER;
     }
@@ -743,19 +737,19 @@ foc_result FOC_IRAM_ATTR foc_core::update_rotor(
  *
  * @return 电流更新结果
  */
-foc_result FOC_IRAM_ATTR foc_core::update_current(
+foc_result IRAM_ATTR foc_core::update_current(
     const phase_current_sample &sample,
     uint32_t timestamp_us)
 {
-    runtime_.current = sample;
+    runtime.current = sample;
     if(!valid_current_sample(sample, timestamp_us))
     {
         return foc_result::SENSOR_ERROR;
     }
 
-    if(absolute_value(sample.phase_a_a) > config_.max_phase_current_a ||
-        absolute_value(sample.phase_b_a) > config_.max_phase_current_a ||
-        absolute_value(sample.phase_c_a) > config_.max_phase_current_a)
+    if(absolute_value(sample.phase_a_a) > config.max_phase_current_a ||
+        absolute_value(sample.phase_b_a) > config.max_phase_current_a ||
+        absolute_value(sample.phase_c_a) > config.max_phase_current_a)
     {
         return foc_result::OUTPUT_RANGE;
     }
@@ -768,9 +762,9 @@ foc_result FOC_IRAM_ATTR foc_core::update_current(
  *
  * @return 功率级故障有效时返回 true
  */
-bool FOC_IRAM_ATTR foc_core::output_fault_active() const
+bool IRAM_ATTR foc_core::output_fault_active() const
 {
-    return output_.fault_active && output_.fault_active(output_.context);
+    return output.fault_active && output.fault_active(output.context);
 }
 
 /**
@@ -778,65 +772,65 @@ bool FOC_IRAM_ATTR foc_core::output_fault_active() const
  *
  * @return 电流控制计算结果
  */
-foc_result FOC_IRAM_ATTR foc_core::run_current_control()
+foc_result IRAM_ATTR foc_core::run_current_control()
 {
-    alpha_beta_current stationary_current = clarke(runtime_.current);
+    alpha_beta_current stationary_current = clarke(runtime.current);
     d_q_current rotating_current = park(stationary_current,
-        runtime_.electrical_angle_rad);
-    runtime_.i_alpha_a = stationary_current.alpha_a;
-    runtime_.i_beta_a = stationary_current.beta_a;
-    runtime_.i_d_a = rotating_current.d_a;
-    runtime_.i_q_a = rotating_current.q_a;
+        runtime.electrical_angle_rad);
+    runtime.i_alpha_a = stationary_current.alpha_a;
+    runtime.i_beta_a = stationary_current.beta_a;
+    runtime.i_d_a = rotating_current.d_a;
+    runtime.i_q_a = rotating_current.q_a;
 
-    if(!is_finite_number(runtime_.i_alpha_a) ||
-        !is_finite_number(runtime_.i_beta_a) ||
-        !is_finite_number(runtime_.i_d_a) ||
-        !is_finite_number(runtime_.i_q_a))
+    if(!is_finite_number(runtime.i_alpha_a) ||
+        !is_finite_number(runtime.i_beta_a) ||
+        !is_finite_number(runtime.i_d_a) ||
+        !is_finite_number(runtime.i_q_a))
     {
         return foc_result::INVALID_NUMBER;
     }
 
-    if(active_target_.mode == foc_control_mode::DISABLED)
+    if(active_target.mode == foc_control_mode::DISABLED)
     {
-        runtime_.d_integral = 0.0f;
-        runtime_.q_integral = 0.0f;
-        runtime_.u_d_v = 0.0f;
-        runtime_.u_q_v = 0.0f;
+        runtime.d_integral = 0.0f;
+        runtime.q_integral = 0.0f;
+        runtime.u_d_v = 0.0f;
+        runtime.u_q_v = 0.0f;
         return foc_result::OK;
     }
-    if(active_target_.mode != foc_control_mode::CURRENT)
+    if(active_target.mode != foc_control_mode::CURRENT)
     {
         return foc_result::INVALID_STATE;
     }
 
-    bool d_axis_valid = run_pi(active_target_.d_axis_current_a,
-        runtime_.i_d_a,
-        config_.control_period_s,
-        config_.d_axis_pi,
-        config_.voltage_limit_v,
-        runtime_.d_integral,
-        runtime_.u_d_v);
-    bool q_axis_valid = run_pi(active_target_.q_axis_current_a,
-        runtime_.i_q_a,
-        config_.control_period_s,
-        config_.q_axis_pi,
-        config_.voltage_limit_v,
-        runtime_.q_integral,
-        runtime_.u_q_v);
+    bool d_axis_valid = run_pi(active_target.d_axis_current_a,
+        runtime.i_d_a,
+        config.control_period_s,
+        config.d_axis_pi,
+        config.voltage_limit_v,
+        runtime.d_integral,
+        runtime.u_d_v);
+    bool q_axis_valid = run_pi(active_target.q_axis_current_a,
+        runtime.i_q_a,
+        config.control_period_s,
+        config.q_axis_pi,
+        config.voltage_limit_v,
+        runtime.q_integral,
+        runtime.u_q_v);
     if(!d_axis_valid || !q_axis_valid)
     {
         return foc_result::INVALID_NUMBER;
     }
 
     d_q_voltage voltage{};
-    voltage.d_v = runtime_.u_d_v;
-    voltage.q_v = runtime_.u_q_v;
-    if(!limit_voltage(voltage, config_.voltage_limit_v))
+    voltage.d_v = runtime.u_d_v;
+    voltage.q_v = runtime.u_q_v;
+    if(!limit_voltage(voltage, config.voltage_limit_v))
     {
         return foc_result::INVALID_NUMBER;
     }
-    runtime_.u_d_v = voltage.d_v;
-    runtime_.u_q_v = voltage.q_v;
+    runtime.u_d_v = voltage.d_v;
+    runtime.u_q_v = voltage.q_v;
     return foc_result::OK;
 }
 
@@ -845,23 +839,23 @@ foc_result FOC_IRAM_ATTR foc_core::run_current_control()
  *
  * @return 输出计算结果
  */
-foc_result FOC_IRAM_ATTR foc_core::calculate_output()
+foc_result IRAM_ATTR foc_core::calculate_output()
 {
     d_q_voltage rotating_voltage{};
-    rotating_voltage.d_v = runtime_.u_d_v;
-    rotating_voltage.q_v = runtime_.u_q_v;
+    rotating_voltage.d_v = runtime.u_d_v;
+    rotating_voltage.q_v = runtime.u_q_v;
     alpha_beta_voltage stationary_voltage = inverse_park(rotating_voltage,
-        runtime_.electrical_angle_rad);
-    runtime_.u_alpha_v = stationary_voltage.alpha_v;
-    runtime_.u_beta_v = stationary_voltage.beta_v;
+        runtime.electrical_angle_rad);
+    runtime.u_alpha_v = stationary_voltage.alpha_v;
+    runtime.u_beta_v = stationary_voltage.beta_v;
 
-    if(!is_finite_number(runtime_.u_alpha_v) ||
-        !is_finite_number(runtime_.u_beta_v))
+    if(!is_finite_number(runtime.u_alpha_v) ||
+        !is_finite_number(runtime.u_beta_v))
     {
-        runtime_.duty = {};
+        runtime.duty = {};
         return foc_result::INVALID_NUMBER;
     }
-    if(!svpwm(stationary_voltage, config_.bus_voltage_v, runtime_.duty))
+    if(!svpwm(stationary_voltage, config.bus_voltage_v, runtime.duty))
     {
         return foc_result::OUTPUT_RANGE;
     }
@@ -878,15 +872,15 @@ foc_result FOC_IRAM_ATTR foc_core::calculate_output()
  * @return 成功读取时返回 true
  */
 template<bool FROM_ISR>
-bool FOC_IRAM_ATTR foc_core::load_target(foc_target &target)
+bool IRAM_ATTR foc_core::load_target(foc_target &target)
 {
     if constexpr(FROM_ISR)
     {
-        return target_topic_.peek_from_isr(target);
+        return target_topic.peek_from_isr(target);
     }
     else
     {
-        return target_topic_.peek(target, 0);
+        return target_topic.peek(target, 0);
     }
 }
 
@@ -898,15 +892,15 @@ bool FOC_IRAM_ATTR foc_core::load_target(foc_target &target)
  * @return 成功读取时返回 true
  */
 template<bool FROM_ISR>
-bool FOC_IRAM_ATTR foc_core::load_rotor(rotor_sample &sample)
+bool IRAM_ATTR foc_core::load_rotor(rotor_sample &sample)
 {
     if constexpr(FROM_ISR)
     {
-        return rotor_topic_.peek_from_isr(sample);
+        return rotor_topic.peek_from_isr(sample);
     }
     else
     {
-        return rotor_topic_.peek(sample, 0);
+        return rotor_topic.peek(sample, 0);
     }
 }
 
@@ -918,16 +912,16 @@ bool FOC_IRAM_ATTR foc_core::load_rotor(rotor_sample &sample)
  * @return 成功读取时返回 true
  */
 template<bool FROM_ISR>
-bool FOC_IRAM_ATTR foc_core::load_current(
+bool IRAM_ATTR foc_core::load_current(
     phase_current_sample &sample)
 {
     if constexpr(FROM_ISR)
     {
-        return current_topic_.peek_from_isr(sample);
+        return current_topic.peek_from_isr(sample);
     }
     else
     {
-        return current_topic_.peek(sample, 0);
+        return current_topic.peek(sample, 0);
     }
 }
 
@@ -937,18 +931,18 @@ bool FOC_IRAM_ATTR foc_core::load_current(
  * @return 输出结果
  */
 template<bool FROM_ISR>
-foc_result FOC_IRAM_ATTR foc_core::apply_output()
+foc_result IRAM_ATTR foc_core::apply_output()
 {
     if(output_fault_active())
     {
         return foc_result::DRIVER_FAULT;
     }
-    if(!is_finite_number(runtime_.duty.phase_a) ||
-        !is_finite_number(runtime_.duty.phase_b) ||
-        !is_finite_number(runtime_.duty.phase_c) ||
-        runtime_.duty.phase_a < 0.0f || runtime_.duty.phase_a > 1.0f ||
-        runtime_.duty.phase_b < 0.0f || runtime_.duty.phase_b > 1.0f ||
-        runtime_.duty.phase_c < 0.0f || runtime_.duty.phase_c > 1.0f)
+    if(!is_finite_number(runtime.duty.phase_a) ||
+        !is_finite_number(runtime.duty.phase_b) ||
+        !is_finite_number(runtime.duty.phase_c) ||
+        runtime.duty.phase_a < 0.0f || runtime.duty.phase_a > 1.0f ||
+        runtime.duty.phase_b < 0.0f || runtime.duty.phase_b > 1.0f ||
+        runtime.duty.phase_c < 0.0f || runtime.duty.phase_c > 1.0f)
     {
         return foc_result::OUTPUT_RANGE;
     }
@@ -956,12 +950,12 @@ foc_result FOC_IRAM_ATTR foc_core::apply_output()
     foc_result result = foc_result::DRIVER_FAULT;
     if constexpr(FROM_ISR)
     {
-        result = output_.apply_duty_from_isr(output_.context,
-            runtime_.duty);
+        result = output.apply_duty_from_isr(output.context,
+            runtime.duty);
     }
     else
     {
-        result = output_.apply_duty(output_.context, runtime_.duty);
+        result = output.apply_duty(output.context, runtime.duty);
     }
     return result == foc_result::OK ? foc_result::OK :
         foc_result::DRIVER_FAULT;
@@ -975,61 +969,61 @@ foc_result FOC_IRAM_ATTR foc_core::apply_output()
  * @param force 是否忽略降频间隔立即发布
  */
 template<bool FROM_ISR>
-void FOC_IRAM_ATTR foc_core::publish_snapshot(uint32_t timestamp_us,
+void IRAM_ATTR foc_core::publish_snapshot(uint32_t timestamp_us,
     BaseType_t *higher_priority_task_woken,
     bool force)
 {
-    if(!force && snapshot_has_timestamp_ &&
-        static_cast<uint32_t>(timestamp_us - last_snapshot_timestamp_us_) <
+    if(!force && snapshot_has_timestamp &&
+        static_cast<uint32_t>(timestamp_us - last_snapshot_timestamp_us) <
             SNAPSHOT_PERIOD_US)
     {
         return;
     }
 
     foc_snapshot snapshot{};
-    snapshot.sequence = snapshot_sequence_ + 1;
+    snapshot.sequence = snapshot_sequence + 1;
     snapshot.timestamp_us = timestamp_us;
-    snapshot.state = state_;
-    snapshot.fault_flags = fault_flags_;
-    snapshot.output_active = output_active_ &&
-        state_ == foc_state::RUNNING;
-    snapshot.mechanical_angle_rad = runtime_.rotor.mechanical_angle_rad;
+    snapshot.state = state;
+    snapshot.fault_flags = fault_flags;
+    snapshot.output_active = output_active &&
+        state == foc_state::RUNNING;
+    snapshot.mechanical_angle_rad = runtime.rotor.mechanical_angle_rad;
     snapshot.mechanical_velocity_rad_s =
-        runtime_.rotor.mechanical_velocity_rad_s;
-    snapshot.electrical_angle_rad = runtime_.electrical_angle_rad;
+        runtime.rotor.mechanical_velocity_rad_s;
+    snapshot.electrical_angle_rad = runtime.electrical_angle_rad;
     snapshot.electrical_velocity_rad_s =
-        runtime_.electrical_velocity_rad_s;
-    snapshot.phase_a_current_a = runtime_.current.phase_a_a;
-    snapshot.phase_b_current_a = runtime_.current.phase_b_a;
-    snapshot.phase_c_current_a = runtime_.current.phase_c_a;
-    snapshot.i_alpha_a = runtime_.i_alpha_a;
-    snapshot.i_beta_a = runtime_.i_beta_a;
-    snapshot.i_d_a = runtime_.i_d_a;
-    snapshot.i_q_a = runtime_.i_q_a;
-    snapshot.target_i_d_a = active_target_.d_axis_current_a;
-    snapshot.target_i_q_a = active_target_.q_axis_current_a;
-    snapshot.u_d_v = runtime_.u_d_v;
-    snapshot.u_q_v = runtime_.u_q_v;
-    snapshot.duty = runtime_.duty;
-    snapshot.bus_voltage_v = config_.bus_voltage_v;
+        runtime.electrical_velocity_rad_s;
+    snapshot.phase_a_current_a = runtime.current.phase_a_a;
+    snapshot.phase_b_current_a = runtime.current.phase_b_a;
+    snapshot.phase_c_current_a = runtime.current.phase_c_a;
+    snapshot.i_alpha_a = runtime.i_alpha_a;
+    snapshot.i_beta_a = runtime.i_beta_a;
+    snapshot.i_d_a = runtime.i_d_a;
+    snapshot.i_q_a = runtime.i_q_a;
+    snapshot.target_i_d_a = active_target.d_axis_current_a;
+    snapshot.target_i_q_a = active_target.q_axis_current_a;
+    snapshot.u_d_v = runtime.u_d_v;
+    snapshot.u_q_v = runtime.u_q_v;
+    snapshot.duty = runtime.duty;
+    snapshot.bus_voltage_v = config.bus_voltage_v;
     snapshot.bus_current_a = 0.0f;
 
     bool published = false;
     if constexpr(FROM_ISR)
     {
         if(!higher_priority_task_woken){return;}
-        published = snapshot_topic_.publish_from_isr(snapshot,
+        published = snapshot_topic.publish_from_isr(snapshot,
             *higher_priority_task_woken);
     }
     else
     {
-        published = snapshot_topic_.publish(snapshot);
+        published = snapshot_topic.publish(snapshot);
     }
     if(!published){return;}
 
-    snapshot_sequence_ = snapshot.sequence;
-    last_snapshot_timestamp_us_ = timestamp_us;
-    snapshot_has_timestamp_ = true;
+    snapshot_sequence = snapshot.sequence;
+    last_snapshot_timestamp_us = timestamp_us;
+    snapshot_has_timestamp = true;
 }
 
 /**
@@ -1043,7 +1037,7 @@ void FOC_IRAM_ATTR foc_core::publish_snapshot(uint32_t timestamp_us,
  * @return 传入的错误结果
  */
 template<bool FROM_ISR>
-foc_result FOC_IRAM_ATTR foc_core::fail_control_cycle(
+foc_result IRAM_ATTR foc_core::fail_control_cycle(
     foc_fault fault,
     foc_result result,
     uint32_t timestamp_us,
@@ -1065,16 +1059,16 @@ foc_result FOC_IRAM_ATTR foc_core::fail_control_cycle(
  * @return 本控制周期结果
  */
 template<bool FROM_ISR>
-foc_result FOC_IRAM_ATTR foc_core::run_control_loop(
+foc_result IRAM_ATTR foc_core::run_control_loop(
     uint32_t timestamp_us,
     BaseType_t *higher_priority_task_woken)
 {
-    if(!initialized_ || state_ == foc_state::UNINITIALIZED)
+    if(!initialized || state == foc_state::UNINITIALIZED)
     {
         return foc_result::NOT_INITIALIZED;
     }
-    if(state_ == foc_state::READY){return foc_result::NOT_READY;}
-    if(state_ != foc_state::RUNNING)
+    if(state == foc_state::READY){return foc_result::NOT_READY;}
+    if(state != foc_state::RUNNING)
     {
         return foc_result::INVALID_STATE;
     }
@@ -1094,7 +1088,7 @@ foc_result FOC_IRAM_ATTR foc_core::run_control_loop(
             timestamp_us,
             higher_priority_task_woken);
     }
-    active_target_ = target;
+    active_target = target;
 
     rotor_sample rotor{};
     if(!load_rotor<FROM_ISR>(rotor) ||
@@ -1182,7 +1176,7 @@ foc_result FOC_IRAM_ATTR foc_core::run_control_loop(
     publish_snapshot<FROM_ISR>(timestamp_us,
         higher_priority_task_woken,
         false);
-    return active_target_.mode == foc_control_mode::DISABLED ?
+    return active_target.mode == foc_control_mode::DISABLED ?
         foc_result::DISABLED : foc_result::OK;
 }
 
@@ -1199,7 +1193,7 @@ foc_result FOC_IRAM_ATTR foc_core::run_control_loop(
 foc_result foc_core::init(const foc_config &config,
     const foc_output &output)
 {
-    if(state_ != foc_state::UNINITIALIZED)
+    if(state != foc_state::UNINITIALIZED)
     {
         return foc_result::INVALID_STATE;
     }
@@ -1214,49 +1208,49 @@ foc_result foc_core::init(const foc_config &config,
         return foc_result::INVALID_ARGUMENT;
     }
 
-    config_ = config;
-    output_ = output;
-    runtime_ = {};
-    active_target_ = {};
-    fault_flags_ = 0;
-    output_active_ = false;
-    initialized_ = false;
-    target_sequence_ = 0;
-    snapshot_sequence_ = 0;
-    last_snapshot_timestamp_us_ = 0;
-    snapshot_has_timestamp_ = false;
+    this->config = config;
+    this->output = output;
+    runtime = {};
+    active_target = {};
+    fault_flags = 0;
+    output_active = false;
+    initialized = false;
+    target_sequence = 0;
+    snapshot_sequence = 0;
+    last_snapshot_timestamp_us = 0;
+    snapshot_has_timestamp = false;
 
-    bool topics_ready = target_topic_.init() && rotor_topic_.init() &&
-        current_topic_.init() && snapshot_topic_.init();
+    bool topics_ready = target_topic.init() && rotor_topic.init() &&
+        current_topic.init() && snapshot_topic.init();
     if(!topics_ready)
     {
         return foc_result::INTERNAL_ERROR;
     }
-    initialized_ = true;
+    initialized = true;
 
     foc_target disabled_target{};
-    if(!target_topic_.publish(disabled_target) ||
-        !rotor_topic_.publish(rotor_sample{}) ||
-        !current_topic_.publish(phase_current_sample{}))
+    if(!target_topic.publish(disabled_target) ||
+        !rotor_topic.publish(rotor_sample{}) ||
+        !current_topic.publish(phase_current_sample{}))
     {
-        initialized_ = false;
+        initialized = false;
         return foc_result::INTERNAL_ERROR;
     }
 
-    foc_result result = output_.init(output_.context);
+    foc_result result = this->output.init(this->output.context);
     if(result != foc_result::OK)
     {
-        fault_flags_ = foc_fault_mask(foc_fault::DRIVER);
-        state_ = foc_state::FAULT;
-        output_.disable(output_.context);
+        fault_flags = foc_fault_mask(foc_fault::DRIVER);
+        state = foc_state::FAULT;
+        this->output.disable(this->output.context);
         publish_snapshot<false>(0, nullptr, true);
-        initialized_ = false;
-        state_ = foc_state::UNINITIALIZED;
+        initialized = false;
+        state = foc_state::UNINITIALIZED;
         return foc_result::DRIVER_FAULT;
     }
 
-    output_.disable(output_.context);
-    state_ = foc_state::READY;
+    this->output.disable(this->output.context);
+    state = foc_state::READY;
     publish_snapshot<false>(0, nullptr, true);
     return foc_result::OK;
 }
@@ -1270,14 +1264,14 @@ foc_result foc_core::init(const foc_config &config,
  */
 foc_result foc_core::enable()
 {
-    if(!initialized_ || state_ == foc_state::UNINITIALIZED)
+    if(!initialized || state == foc_state::UNINITIALIZED)
     {
         return foc_result::NOT_INITIALIZED;
     }
-    if(state_ != foc_state::READY){return foc_result::INVALID_STATE;}
+    if(state != foc_state::READY){return foc_result::INVALID_STATE;}
 
     foc_target target{};
-    if(!target_topic_.peek(target, 0)){return foc_result::NOT_READY;}
+    if(!target_topic.peek(target, 0)){return foc_result::NOT_READY;}
     if(target.mode != foc_control_mode::CURRENT)
     {
         return foc_result::DISABLED;
@@ -1293,10 +1287,10 @@ foc_result foc_core::enable()
         return foc_result::DRIVER_FAULT;
     }
 
-    active_target_ = target;
+    active_target = target;
     reset_control_output();
-    foc_result result = output_.apply_duty(output_.context,
-        runtime_.duty);
+    foc_result result = output.apply_duty(output.context,
+        runtime.duty);
     if(result != foc_result::OK)
     {
         enter_fault(foc_fault::DRIVER);
@@ -1304,7 +1298,7 @@ foc_result foc_core::enable()
         return foc_result::DRIVER_FAULT;
     }
 
-    result = output_.enable(output_.context);
+    result = output.enable(output.context);
     if(result != foc_result::OK || output_fault_active())
     {
         enter_fault(foc_fault::DRIVER);
@@ -1312,8 +1306,8 @@ foc_result foc_core::enable()
         return foc_result::DRIVER_FAULT;
     }
 
-    output_active_ = true;
-    state_ = foc_state::RUNNING;
+    output_active = true;
+    state = foc_state::RUNNING;
     publish_snapshot<false>(latest_timestamp_us(), nullptr, true);
     return foc_result::OK;
 }
@@ -1325,13 +1319,13 @@ foc_result foc_core::enable()
  */
 void foc_core::disable()
 {
-    if(!initialized_ || state_ == foc_state::UNINITIALIZED){return;}
+    if(!initialized || state == foc_state::UNINITIALIZED){return;}
 
-    output_.disable(output_.context);
-    output_active_ = false;
-    if(state_ == foc_state::RUNNING)
+    output.disable(output.context);
+    output_active = false;
+    if(state == foc_state::RUNNING)
     {
-        state_ = foc_state::READY;
+        state = foc_state::READY;
     }
     publish_disabled_target();
     reset_control_output();
@@ -1350,11 +1344,11 @@ void foc_core::disable()
  */
 foc_result foc_core::set_target(const foc_target &target)
 {
-    if(!initialized_ || state_ == foc_state::UNINITIALIZED)
+    if(!initialized || state == foc_state::UNINITIALIZED)
     {
         return foc_result::NOT_INITIALIZED;
     }
-    if(state_ == foc_state::FAULT){return foc_result::INVALID_STATE;}
+    if(state == foc_state::FAULT){return foc_result::INVALID_STATE;}
     if(target.mode != foc_control_mode::DISABLED &&
         target.mode != foc_control_mode::CURRENT)
     {
@@ -1377,8 +1371,8 @@ foc_result foc_core::set_target(const foc_target &target)
         return foc_result::OUTPUT_RANGE;
     }
 
-    checked_target.sequence = ++target_sequence_;
-    return target_topic_.publish(checked_target) ? foc_result::OK :
+    checked_target.sequence = ++target_sequence;
+    return target_topic.publish(checked_target) ? foc_result::OK :
         foc_result::NOT_READY;
 }
 
@@ -1405,7 +1399,7 @@ foc_result foc_core::core_loop(uint32_t timestamp_us)
  * @note 本函数不调用 portYIELD_FROM_ISR()；调用方应在 ISR 结束前统一处理
  *       higher_priority_task_woken。调用链不得执行阻塞、分配或任务上下文操作。
  */
-foc_result FOC_IRAM_ATTR foc_core::core_loop_from_isr(
+foc_result IRAM_ATTR foc_core::core_loop_from_isr(
     uint32_t timestamp_us,
     BaseType_t &higher_priority_task_woken)
 {
@@ -1420,7 +1414,7 @@ foc_result FOC_IRAM_ATTR foc_core::core_loop_from_isr(
  */
 foc_topic_access foc_core::topics()
 {
-    return foc_topic_access{rotor_topic_, current_topic_, snapshot_topic_};
+    return foc_topic_access{rotor_topic, current_topic, snapshot_topic};
 }
 
 /**
@@ -1432,19 +1426,19 @@ foc_topic_access foc_core::topics()
  */
 foc_result foc_core::clear_fault()
 {
-    if(!initialized_ || state_ == foc_state::UNINITIALIZED)
+    if(!initialized || state == foc_state::UNINITIALIZED)
     {
         return foc_result::NOT_INITIALIZED;
     }
-    if(state_ != foc_state::FAULT){return foc_result::INVALID_STATE;}
-    if(output_active_){return foc_result::INVALID_STATE;}
+    if(state != foc_state::FAULT){return foc_result::INVALID_STATE;}
+    if(output_active){return foc_result::INVALID_STATE;}
     if(output_fault_active()){return foc_result::DRIVER_FAULT;}
 
-    output_.disable(output_.context);
+    output.disable(output.context);
     publish_disabled_target();
     reset_control_output();
-    fault_flags_ = 0;
-    state_ = foc_state::READY;
+    fault_flags = 0;
+    state = foc_state::READY;
     publish_snapshot<false>(latest_timestamp_us(), nullptr, true);
     return foc_result::OK;
 }
